@@ -1,1 +1,6 @@
 @import "tailwindcss";
+
+/* Hide the engine's default drag overlay since we use a custom one */
+.drag-overlay {
+  display: none !important;
+}

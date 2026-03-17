@@ -210,7 +210,6 @@ function chooseSuit(
 
 	if (allSuitsChosen(G)) {
 		initializeAfterSuitSelection(G);
-		// Setup already deals 3 cards (= Jack's vitality); no extra draw needed
 		events.setPhase('placement');
 	} else {
 		events.endTurn();

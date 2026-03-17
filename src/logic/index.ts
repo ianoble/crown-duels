@@ -4,7 +4,7 @@ import { CrownDuelsGame } from './game';
 import type { CrownDuelsState, CrownDuelsCard } from './types';
 import { ZONES } from './types';
 
-export type { CrownDuelsState, CrownDuelsCard, PlayerState, Zone, Suit, RoundResult, FightDetail } from './types';
+export type { CrownDuelsState, CrownDuelsCard, PlayerState, Zone, Suit, RoundResult, FightDetail, RevealEvent, FightEvent } from './types';
 export { PLAYER_COLORS, SUITS, ZONES, ROYAL_VITALITY } from './types';
 export type { PlayerColor } from './types';
 

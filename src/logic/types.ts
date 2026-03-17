@@ -71,6 +71,27 @@ export interface PlayerState {
 // Round resolution results (stored for UI playback)
 // ---------------------------------------------------------------------------
 
+/** A single event that happened during reveal (for step-by-step animation) */
+export interface RevealEvent {
+	step: 1 | 2 | 3 | 4 | 5;
+	playerId: string;
+	type: 'flip' | 'discard';
+	zone?: Zone;
+	cardIds: string[];
+	cards?: CrownDuelsCard[]; // Full card data for rendering during animation
+	reason?: string;
+}
+
+/** A single event that happened during fight (for step-by-step animation) */
+export interface FightEvent {
+	step: number;
+	playerId: string;
+	type: 'strength' | 'block' | 'damage' | 'exploit';
+	label: string;
+	value: number;
+	detail?: string;
+}
+
 export interface FightDetail {
 	weaponStrength: number;
 	igniteStrength: number;
@@ -89,6 +110,10 @@ export interface FightDetail {
 export interface RoundResult {
 	roundNumber: number;
 	players: Record<string, FightDetail>;
+	/** Step-by-step reveal events for animation playback */
+	revealEvents: RevealEvent[];
+	/** Step-by-step fight events for animation playback */
+	fightEvents: FightEvent[];
 }
 
 // ---------------------------------------------------------------------------

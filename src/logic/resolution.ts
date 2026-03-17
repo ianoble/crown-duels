@@ -1,4 +1,4 @@
-import type { CrownDuelsCard, CrownDuelsState, PlayerState, FightDetail, RoundResult } from './types';
+import type { CrownDuelsCard, CrownDuelsState, PlayerState, FightDetail, RoundResult, RevealEvent, FightEvent } from './types';
 import { ROYAL_VITALITY } from './types';
 import { drawCards, reshuffleDiscard } from './cards';
 
@@ -48,7 +48,9 @@ function countMatchingValues(cards: CrownDuelsCard[], value: number): number {
  * 4. Discard all ♣s in defence zone and all ♠s in attack zone.
  * 5. In spell zone: discard all cards that share a suit with another card.
  */
-export function resolveReveal(G: CrownDuelsState): void {
+export function resolveReveal(G: CrownDuelsState): RevealEvent[] {
+	const events: RevealEvent[] = [];
+
 	for (const pid of Object.keys(G.players)) {
 		const p = G.players[pid];
 
@@ -56,10 +58,25 @@ export function resolveReveal(G: CrownDuelsState): void {
 		const newDefenceSpades = p.zones.defence.filter((c) => c.faceDown && c.suit === 'spades');
 
 		// 1. Flip all non-corruption zone cards face-up
+		const flippedCards: CrownDuelsCard[] = [];
 		for (const zone of ['attack', 'defence', 'spell'] as const) {
 			for (const card of p.zones[zone]) {
-				card.faceDown = false;
+				if (card.faceDown) {
+					// Clone the card with faceDown=true for animation (before we flip it)
+					flippedCards.push({ ...card, faceDown: true });
+					card.faceDown = false;
+				}
 			}
+		}
+		if (flippedCards.length > 0) {
+			events.push({
+				step: 1,
+				playerId: pid,
+				type: 'flip',
+				cardIds: flippedCards.map((c) => c.id),
+				cards: flippedCards,
+				reason: 'Reveal all cards',
+			});
 		}
 
 		// 2. Attack zone: discard existing ♣s higher than lowest new ♣
@@ -68,9 +85,20 @@ export function resolveReveal(G: CrownDuelsState): void {
 			const toDiscard = p.zones.attack.filter(
 				(c) => c.suit === 'clubs' && !newAttackClubs.includes(c) && c.value > lowestNewClub,
 			);
-			for (const card of toDiscard) {
-				p.zones.attack.splice(p.zones.attack.indexOf(card), 1);
-				G.discardPile.push(card);
+			if (toDiscard.length > 0) {
+				events.push({
+					step: 2,
+					playerId: pid,
+					type: 'discard',
+					zone: 'attack',
+					cardIds: toDiscard.map((c) => c.id),
+					cards: toDiscard.map((c) => ({ ...c })),
+					reason: `♣s higher than ${lowestNewClub} in attack`,
+				});
+				for (const card of toDiscard) {
+					p.zones.attack.splice(p.zones.attack.indexOf(card), 1);
+					G.discardPile.push(card);
+				}
 			}
 		}
 
@@ -80,22 +108,55 @@ export function resolveReveal(G: CrownDuelsState): void {
 			const toDiscard = p.zones.defence.filter(
 				(c) => c.suit === 'spades' && !newDefenceSpades.includes(c) && c.value > lowestNewSpade,
 			);
-			for (const card of toDiscard) {
-				p.zones.defence.splice(p.zones.defence.indexOf(card), 1);
-				G.discardPile.push(card);
+			if (toDiscard.length > 0) {
+				events.push({
+					step: 3,
+					playerId: pid,
+					type: 'discard',
+					zone: 'defence',
+					cardIds: toDiscard.map((c) => c.id),
+					cards: toDiscard.map((c) => ({ ...c })),
+					reason: `♠s higher than ${lowestNewSpade} in defence`,
+				});
+				for (const card of toDiscard) {
+					p.zones.defence.splice(p.zones.defence.indexOf(card), 1);
+					G.discardPile.push(card);
+				}
 			}
 		}
 
 		// 4. Discard ♣s in defence zone and ♠s in attack zone
 		const wrongSuitDefence = p.zones.defence.filter((c) => c.suit === 'clubs');
-		for (const card of wrongSuitDefence) {
-			p.zones.defence.splice(p.zones.defence.indexOf(card), 1);
-			G.discardPile.push(card);
+		if (wrongSuitDefence.length > 0) {
+			events.push({
+				step: 4,
+				playerId: pid,
+				type: 'discard',
+				zone: 'defence',
+				cardIds: wrongSuitDefence.map((c) => c.id),
+				cards: wrongSuitDefence.map((c) => ({ ...c })),
+				reason: '♣s cannot be in defence',
+			});
+			for (const card of wrongSuitDefence) {
+				p.zones.defence.splice(p.zones.defence.indexOf(card), 1);
+				G.discardPile.push(card);
+			}
 		}
 		const wrongSuitAttack = p.zones.attack.filter((c) => c.suit === 'spades');
-		for (const card of wrongSuitAttack) {
-			p.zones.attack.splice(p.zones.attack.indexOf(card), 1);
-			G.discardPile.push(card);
+		if (wrongSuitAttack.length > 0) {
+			events.push({
+				step: 4,
+				playerId: pid,
+				type: 'discard',
+				zone: 'attack',
+				cardIds: wrongSuitAttack.map((c) => c.id),
+				cards: wrongSuitAttack.map((c) => ({ ...c })),
+				reason: '♠s cannot be in attack',
+			});
+			for (const card of wrongSuitAttack) {
+				p.zones.attack.splice(p.zones.attack.indexOf(card), 1);
+				G.discardPile.push(card);
+			}
 		}
 
 		// 5. Spell zone: discard all cards of any suit that appears more than once
@@ -109,10 +170,21 @@ export function resolveReveal(G: CrownDuelsState): void {
 		}
 		if (duplicateSuits.size > 0) {
 			const spellDiscards = p.zones.spell.filter((c) => duplicateSuits.has(c.suit as string));
+			events.push({
+				step: 5,
+				playerId: pid,
+				type: 'discard',
+				zone: 'spell',
+				cardIds: spellDiscards.map((c) => c.id),
+				cards: spellDiscards.map((c) => ({ ...c })),
+				reason: 'Duplicate suits in spell zone',
+			});
 			p.zones.spell = p.zones.spell.filter((c) => !duplicateSuits.has(c.suit as string));
 			G.discardPile.push(...spellDiscards);
 		}
 	}
+
+	return events;
 }
 
 // ---------------------------------------------------------------------------
@@ -449,11 +521,101 @@ export function resolveRound(G: CrownDuelsState): RoundResult {
 	const resolveOrder = p0.hasJester ? [0, 1] : [1, 0];
 
 	// --- Phase 2: REVEAL ---
-	resolveReveal(G);
+	const revealEvents = resolveReveal(G);
 
 	// --- Phase 3: FIGHT (includes ♣/♠ spell adjustments) ---
 	const detail0 = buildFightDetail(p0);
 	const detail1 = buildFightDetail(p1);
+
+	// Build fight events for animation
+	const fightEvents: FightEvent[] = [];
+	let stepNum = 1;
+
+	// Step 1: Weapons (♣ in attack)
+	for (const [pid, detail] of [[pids[0], detail0], [pids[1], detail1]] as const) {
+		if (detail.weaponStrength > 0) {
+			fightEvents.push({
+				step: stepNum,
+				playerId: pid,
+				type: 'strength',
+				label: '♣ Weapons',
+				value: detail.weaponStrength,
+				detail: 'Highest ♣ + 1 per other ♣',
+			});
+		}
+	}
+	stepNum++;
+
+	// Step 2: Ignite (♥ in attack)
+	for (const [pid, detail] of [[pids[0], detail0], [pids[1], detail1]] as const) {
+		if (detail.igniteStrength > 0) {
+			fightEvents.push({
+				step: stepNum,
+				playerId: pid,
+				type: 'strength',
+				label: '♥ Ignite',
+				value: detail.igniteStrength,
+				detail: '♥ values (double if matches ♣)',
+			});
+		}
+	}
+	stepNum++;
+
+	// Step 3: Armour (♠ in defence)
+	for (const [pid, detail] of [[pids[0], detail0], [pids[1], detail1]] as const) {
+		if (detail.armourBlock > 0) {
+			fightEvents.push({
+				step: stepNum,
+				playerId: pid,
+				type: 'block',
+				label: '♠ Armour',
+				value: detail.armourBlock,
+				detail: 'Highest ♠ + 1 per other ♠',
+			});
+		}
+	}
+	stepNum++;
+
+	// Step 4: Ward (♥ in defence)
+	for (const [pid, detail] of [[pids[0], detail0], [pids[1], detail1]] as const) {
+		if (detail.wardBlock > 0) {
+			fightEvents.push({
+				step: stepNum,
+				playerId: pid,
+				type: 'block',
+				label: '♥ Ward',
+				value: detail.wardBlock,
+				detail: '♥ values (double if matches ♠)',
+			});
+		}
+	}
+	stepNum++;
+
+	// Step 5: Spell adjustments (All Out Attack/Defence)
+	for (const [pid, player] of [[pids[0], p0], [pids[1], p1]] as const) {
+		const spells = resolveSpellAdjustments(player.zones.spell);
+		if (spells.allOutAttack) {
+			fightEvents.push({
+				step: stepNum,
+				playerId: pid,
+				type: 'strength',
+				label: '♣ All Out Attack!',
+				value: 0,
+				detail: 'Block → Strength, Block = 0',
+			});
+		}
+		if (spells.allOutDefence) {
+			fightEvents.push({
+				step: stepNum,
+				playerId: pid,
+				type: 'block',
+				label: '♠ All Out Defence!',
+				value: 0,
+				detail: 'Strength → Block, Strength = 0',
+			});
+		}
+	}
+	stepNum++;
 
 	// Check hits: strength > opponent's block
 	const p0Hits = detail0.totalStrength > detail1.totalBlock;
@@ -461,17 +623,54 @@ export function resolveRound(G: CrownDuelsState): RoundResult {
 	detail0.didHit = p0Hits;
 	detail1.didHit = p1Hits;
 
-	// Damage (base 1 + critical hit bonuses)
+	// Step 6: Compare strength vs block
+	fightEvents.push({
+		step: stepNum,
+		playerId: pids[0],
+		type: 'damage',
+		label: p0Hits ? '⚔ HIT!' : '🛡 Blocked',
+		value: 0,
+		detail: `${detail0.totalStrength} STR vs ${detail1.totalBlock} BLK`,
+	});
+	fightEvents.push({
+		step: stepNum,
+		playerId: pids[1],
+		type: 'damage',
+		label: p1Hits ? '⚔ HIT!' : '🛡 Blocked',
+		value: 0,
+		detail: `${detail1.totalStrength} STR vs ${detail0.totalBlock} BLK`,
+	});
+	stepNum++;
+
+	// Step 7: Critical Hit damage (♦ in attack)
+	const crit0 = p0Hits ? calcCriticalHitDamage(p0.zones.attack) : 0;
+	const crit1 = p1Hits ? calcCriticalHitDamage(p1.zones.attack) : 0;
+	
 	if (p0Hits) {
-		const crit = calcCriticalHitDamage(p0.zones.attack);
-		detail0.damageDealt = 1 + crit;
-		detail1.damageTaken = 1 + crit;
+		detail0.damageDealt = 1 + crit0;
+		detail1.damageTaken = 1 + crit0;
+		fightEvents.push({
+			step: stepNum,
+			playerId: pids[0],
+			type: 'damage',
+			label: '♦ Critical Hit!',
+			value: detail0.damageDealt,
+			detail: crit0 > 0 ? `Base 1 + ${crit0} from ♦ (match bonus included)` : 'Base damage: 1',
+		});
 	}
 	if (p1Hits) {
-		const crit = calcCriticalHitDamage(p1.zones.attack);
-		detail1.damageDealt = 1 + crit;
-		detail0.damageTaken = 1 + crit;
+		detail1.damageDealt = 1 + crit1;
+		detail0.damageTaken = 1 + crit1;
+		fightEvents.push({
+			step: stepNum,
+			playerId: pids[1],
+			type: 'damage',
+			label: '♦ Critical Hit!',
+			value: detail1.damageDealt,
+			detail: crit1 > 0 ? `Base 1 + ${crit1} from ♦ (match bonus included)` : 'Base damage: 1',
+		});
 	}
+	if (p0Hits || p1Hits) stepNum++;
 
 	// Exploit (♦ in defence): draw cards when hit. Jester holder resolves first.
 	for (const idx of resolveOrder) {
@@ -485,6 +684,14 @@ export function resolveRound(G: CrownDuelsState): RoundResult {
 				ensureDeckHasCards(G, exploitDraw);
 				player.hand.push(...drawCards(G.drawDeck, exploitDraw));
 				detail.cardsDrawnFromExploit = exploitDraw;
+				fightEvents.push({
+					step: stepNum,
+					playerId: pids[idx],
+					type: 'exploit',
+					label: '♦ Exploit',
+					value: exploitDraw,
+					detail: `Drew ${exploitDraw} card${exploitDraw > 1 ? 's' : ''} when hit`,
+				});
 			}
 		}
 	}
@@ -523,6 +730,8 @@ export function resolveRound(G: CrownDuelsState): RoundResult {
 			[pids[0]]: detail0,
 			[pids[1]]: detail1,
 		},
+		revealEvents,
+		fightEvents,
 	};
 }
 
