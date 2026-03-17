@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useGame, useTurnNotifications, loadSession, clearSession } from "@engine/client";
-import { gameDef, type TemplateGameState } from "../logic/game-logic";
+import { gameDef, type CrownDuelsState } from "../logic/index";
 import { useBotPlayers } from "../composables/useBotPlayers";
 import GameBoard from "../components/GameBoard.vue";
 import { SERVER_URL } from "../config";
@@ -17,22 +17,22 @@ import {
 const props = defineProps<{ matchID: string; playerID: string }>();
 const router = useRouter();
 
-const { isConnected, isMyTurn, state, currentPlayer, gameover, reconnecting, connect, disconnect, playerID, move } = useGame();
+const { isConnected, isMyTurn, state, currentPlayer, gameover, reconnecting, connect, disconnect, playerID } = useGame();
 
-const G = computed(() => state.value as unknown as TemplateGameState | undefined);
+const G = computed(() => state.value as unknown as CrownDuelsState | undefined);
 
-const PLAYER_COLOR_BADGE: Record<string, string> = {
-	red: "bg-red-900/40 text-red-300",
-	blue: "bg-blue-900/40 text-blue-300",
-	green: "bg-green-900/40 text-green-300",
-	yellow: "bg-yellow-900/40 text-yellow-300",
+const PLAYER_SUIT_BADGE: Record<string, string> = {
+	hearts: "bg-red-900/40 text-red-300",
+	diamonds: "bg-blue-900/40 text-blue-300",
+	clubs: "bg-green-900/40 text-green-300",
+	spades: "bg-purple-900/40 text-purple-300",
 };
 
-const currentPlayerColor = computed(() => {
+const currentPlayerSuit = computed(() => {
 	if (!G.value?.players) return null;
 	const cp = currentPlayer.value;
 	if (!cp) return null;
-	return G.value.players[cp]?.color ?? null;
+	return G.value.players[cp]?.chosenSuit ?? null;
 });
 
 const { requestPermission: requestTurnNotifications, permission: notificationPermission, supported: notificationsSupported } = useTurnNotifications({
@@ -94,50 +94,7 @@ watch(isMyTurn, (newTurn) => {
 
 const confirmingAbandon = ref(false);
 const gameMenuOpen = ref(false);
-const hasAppliedSessionColor = ref(false);
-let sessionColorRetryTimer: ReturnType<typeof setTimeout> | null = null;
-const SESSION_COLOR_RETRY_MAX = 6;
-const SESSION_COLOR_RETRY_MS = 350;
-
-function tryApplySessionColor(attempt = 0) {
-	if (hasAppliedSessionColor.value || gameover.value) return;
-	const pid = playerID.value;
-	if (!pid || !isConnected.value) return;
-	const g = G.value;
-	const p = g?.players?.[pid];
-	if (!p) return;
-	const session = loadSession(gameDef.id, props.matchID) as { playerColor?: string } | undefined;
-	if (!session?.playerColor) return;
-	if (p.color === session.playerColor) {
-		hasAppliedSessionColor.value = true;
-		return;
-	}
-	move("setPlayerColor", session.playerColor);
-	if (attempt < SESSION_COLOR_RETRY_MAX) {
-		sessionColorRetryTimer = setTimeout(() => tryApplySessionColor(attempt + 1), SESSION_COLOR_RETRY_MS);
-	}
-}
-
-watch(
-	[() => G.value?.players, playerID, isConnected],
-	([players, pid, connected]) => {
-		if (!connected || hasAppliedSessionColor.value || gameover.value || !pid) return;
-		const p = (players as TemplateGameState["players"])?.[pid as string];
-		if (!p) return;
-		const session = loadSession(gameDef.id, props.matchID) as { playerColor?: string } | undefined;
-		if (!session?.playerColor) return;
-		if (p.color === session.playerColor) {
-			hasAppliedSessionColor.value = true;
-			return;
-		}
-		if (sessionColorRetryTimer) return;
-		sessionColorRetryTimer = setTimeout(() => {
-			sessionColorRetryTimer = null;
-			tryApplySessionColor(0);
-		}, 200);
-	},
-	{ immediate: true }
-);
+// Crown Duels doesn't use a session color — suit choice is the identity
 
 function closeGameMenu() {
 	gameMenuOpen.value = false;
@@ -203,11 +160,10 @@ onMounted(() => {
 	setTimeout(() => requestTurnNotifications(), 2000);
 });
 
-watch([isMyTurn, currentPlayerColor], () => nextTick(measureHeader));
+watch([isMyTurn, currentPlayerSuit], () => nextTick(measureHeader));
 
 onUnmounted(() => {
 	if (cueTimeout) clearTimeout(cueTimeout);
-	if (sessionColorRetryTimer) clearTimeout(sessionColorRetryTimer);
 	disconnect();
 	stopVotePolling();
 	document.removeEventListener('click', onClickOutsideMenu);
@@ -326,12 +282,12 @@ async function abandonGame() {
 						<template v-if="isMyTurn">
 							<span class="text-emerald-400 font-medium animate-pulse">Your turn</span>
 						</template>
-						<template v-else-if="currentPlayerColor">
+						<template v-else-if="currentPlayerSuit">
 							<span
 								class="px-1.5 py-0.5 rounded text-[10px] md:text-xs font-medium leading-none"
-								:class="PLAYER_COLOR_BADGE[currentPlayerColor] ?? 'bg-slate-800/60 text-slate-200'"
+								:class="PLAYER_SUIT_BADGE[currentPlayerSuit] ?? 'bg-slate-800/60 text-slate-200'"
 							>
-								<span class="capitalize">{{ currentPlayerColor }}</span>'s turn
+								<span class="capitalize">{{ currentPlayerSuit }}</span>'s turn
 							</span>
 						</template>
 					</div>

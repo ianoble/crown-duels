@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { saveSession, loadSession } from '@engine/client';
-import { gameDef, PLAYER_COLORS, type PlayerColor } from '../logic/game-logic';
+import { gameDef, PLAYER_COLORS, type PlayerColor } from '../logic/index';
 import { SERVER_URL } from '../config';
 import { useAuth, syncSessionToServer, fetchServerSessions } from '../composables/useAuth';
 
@@ -16,7 +16,7 @@ const authPin = ref('');
 const status = ref<'auth' | 'ready' | 'joining' | 'error'>('auth');
 const errorMsg = ref('');
 const matchPlayers = ref<Array<{ id: number; name?: string; data?: { color?: string } }>>([]);
-const selectedColor = ref<PlayerColor>('red');
+const selectedColor = ref<PlayerColor>('crimson');
 
 onMounted(async () => {
 	const existing = loadSession(gameDef.id, props.matchID);
@@ -199,7 +199,7 @@ async function joinMatch() {
 							class="w-10 h-10 rounded-full border-2 transition-all shrink-0"
 							:class="[
 								selectedColor === c ? 'border-white scale-110 ring-2 ring-white/50' : 'border-slate-600 hover:border-slate-500',
-								{ red: 'bg-red-500', blue: 'bg-blue-500', green: 'bg-green-500', yellow: 'bg-yellow-400', black: 'bg-slate-700' }[c],
+								{ crimson: 'bg-red-600', royalblue: 'bg-blue-600' }[c] ?? 'bg-slate-600',
 							]"
 							:title="c"
 							@click="selectedColor = c"

@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useRouter } from "vue-router";
 import { saveSession, loadSession, clearSession } from "@engine/client";
-import { gameDef, PLAYER_COLORS, type PlayerColor } from "../logic/game-logic";
+import { gameDef, PLAYER_COLORS, type PlayerColor } from "../logic/index";
 import { SERVER_URL } from "../config";
 import { useAuth, authHeaders, syncSessionToServer, deleteServerSession, fetchServerSessions } from "../composables/useAuth";
 
@@ -90,7 +90,7 @@ const errorMsg = ref("");
 const showCreateForm = ref(false);
 const numPlayers = ref(gameDef.minPlayers);
 const creating = ref(false);
-const selectedColor = ref<PlayerColor>("red");
+const selectedColor = ref<PlayerColor>("crimson");
 
 function buildDefaultSetupData(): Record<string, unknown> {
 	const data: Record<string, unknown> = {};
@@ -114,14 +114,14 @@ const hostedPlayers = ref<MatchPlayer[]>([]);
 const linkCopied = ref(false);
 
 const joinModalMatchID = ref<string | null>(null);
-const joinModalColor = ref<PlayerColor>("red");
+const joinModalColor = ref<PlayerColor>("crimson");
 function openJoinModal(game: MatchInfo) {
 	joinModalMatchID.value = game.matchID;
 	const taken = new Set(
 		game.players.map((p) => p.data?.color).filter(Boolean) as string[],
 	);
 	const available = PLAYER_COLORS.filter((c) => !taken.has(c));
-	joinModalColor.value = (available[0] as PlayerColor) ?? "red";
+	joinModalColor.value = (available[0] as PlayerColor) ?? "crimson";
 }
 function closeJoinModal() {
 	joinModalMatchID.value = null;
@@ -699,7 +699,7 @@ onUnmounted(stopPolling);
 									class="w-9 h-9 rounded-full border-2 transition-all shrink-0"
 									:class="[
 										selectedColor === c ? 'border-white scale-110 ring-2 ring-white/50' : 'border-slate-600 hover:border-slate-500',
-										{ red: 'bg-red-500', blue: 'bg-blue-500', green: 'bg-green-500', yellow: 'bg-yellow-400', black: 'bg-slate-700' }[c],
+										{ crimson: 'bg-red-600', royalblue: 'bg-blue-600' }[c] ?? 'bg-slate-600',
 									]"
 									:title="c"
 									@click="selectedColor = c"
@@ -859,9 +859,9 @@ onUnmounted(stopPolling);
 									:class="
 										!p.name
 											? 'bg-slate-600'
-											: ({ red: 'bg-red-500', blue: 'bg-blue-500', green: 'bg-green-500', yellow: 'bg-yellow-400', black: 'bg-slate-700' } as Record<string, string>)[
+											: ({ crimson: 'bg-red-600', royalblue: 'bg-blue-600' } as Record<string, string>)[
 													p.data?.color ?? ''
-												] ?? 'bg-green-400'
+												] ?? 'bg-slate-600'
 									"
 								/>
 								<span class="text-sm" :class="p.name ? 'text-white' : 'text-slate-600'">
@@ -917,7 +917,7 @@ onUnmounted(stopPolling);
 							class="w-10 h-10 rounded-full border-2 transition-all shrink-0"
 							:class="[
 								joinModalColor === c ? 'border-white scale-110 ring-2 ring-white/50' : 'border-slate-600 hover:border-slate-500',
-								{ red: 'bg-red-500', blue: 'bg-blue-500', green: 'bg-green-500', yellow: 'bg-yellow-400', black: 'bg-slate-700' }[c],
+								{ crimson: 'bg-red-600', royalblue: 'bg-blue-600' }[c] ?? 'bg-slate-600',
 							]"
 							:title="c"
 							@click="joinModalColor = c"
