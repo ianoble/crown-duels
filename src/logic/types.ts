@@ -65,6 +65,8 @@ export interface PlayerState {
 	justBecameCorrupt: boolean;
 	/** Whether this player has finished placing cards this round. */
 	donePlacing: boolean;
+	/** Whether this player has confirmed seeing the revealed cards. */
+	confirmedReveal: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +129,8 @@ export interface CrownDuelsState extends BaseGameState {
 	roundNumber: number;
 	/** Last round's resolution result, for UI display. */
 	lastRoundResult: RoundResult | null;
+	/** Reveal events for the current round (before fight confirmation). */
+	pendingRevealEvents: RevealEvent[] | null;
 	/** Set when game is over. */
 	gameWinner: string | null;
 }

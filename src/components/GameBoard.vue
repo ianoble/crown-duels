@@ -8,11 +8,18 @@ import type { VisibleCard } from "@engine/client/index";
 defineProps<{ headerHeight: number }>();
 defineEmits<{ "back-to-lobby": [] }>();
 
-const { state, move, isMyTurn, playerID } = useGame();
+const { state, ctx, move, isMyTurn, playerID } = useGame();
 const { registerDropZone, unregisterDropZone, startDrag, state: dragState, onDrop } = useCardDrag();
 
 const G = computed(() => state.value as unknown as CrownDuelsState | undefined);
 const myPID = computed(() => playerID?.value ?? null);
+const currentPhase = computed(() => ctx.value?.phase ?? "placement");
+
+// Backup check: if pendingRevealEvents exists, we're in reveal phase
+const isInRevealPhase = computed(() => {
+	return currentPhase.value === "reveal" || (G.value?.pendingRevealEvents && G.value.pendingRevealEvents.length > 0);
+});
+const showHelp = ref(false);
 
 // Reveal animation state
 const isPlayingReveal = ref(false);
@@ -109,20 +116,17 @@ function getRevealZoneCards(pid: string, zone: Zone): CrownDuelsCard[] {
 }
 
 // Virtual zone cards for each player during reveal
-const revealOppAttack = computed(() => (opp.value ? getRevealZoneCards(oppPID.value!, 'attack') : []));
-const revealOppDefence = computed(() => (opp.value ? getRevealZoneCards(oppPID.value!, 'defence') : []));
-const revealOppSpell = computed(() => (opp.value ? getRevealZoneCards(oppPID.value!, 'spell') : []));
-const revealOppCorruption = computed(() => (opp.value ? getRevealZoneCards(oppPID.value!, 'corruption') : []));
-const revealMyAttack = computed(() => (me.value ? getRevealZoneCards(myPID.value!, 'attack') : []));
-const revealMyDefence = computed(() => (me.value ? getRevealZoneCards(myPID.value!, 'defence') : []));
-const revealMySpell = computed(() => (me.value ? getRevealZoneCards(myPID.value!, 'spell') : []));
-const revealMyCorruption = computed(() => (me.value ? getRevealZoneCards(myPID.value!, 'corruption') : []));
+const revealOppAttack = computed(() => (opp.value ? getRevealZoneCards(oppPID.value!, "attack") : []));
+const revealOppDefence = computed(() => (opp.value ? getRevealZoneCards(oppPID.value!, "defence") : []));
+const revealOppSpell = computed(() => (opp.value ? getRevealZoneCards(oppPID.value!, "spell") : []));
+const revealOppCorruption = computed(() => (opp.value ? getRevealZoneCards(oppPID.value!, "corruption") : []));
+const revealMyAttack = computed(() => (me.value ? getRevealZoneCards(myPID.value!, "attack") : []));
+const revealMyDefence = computed(() => (me.value ? getRevealZoneCards(myPID.value!, "defence") : []));
+const revealMySpell = computed(() => (me.value ? getRevealZoneCards(myPID.value!, "spell") : []));
+const revealMyCorruption = computed(() => (me.value ? getRevealZoneCards(myPID.value!, "corruption") : []));
 
 // Get zone cards to display (either reveal animation cards or actual cards)
-function getDisplayZoneCards(
-	actualCards: CrownDuelsCard[] | undefined,
-	revealCards: CrownDuelsCard[],
-): CrownDuelsCard[] {
+function getDisplayZoneCards(actualCards: CrownDuelsCard[] | undefined, revealCards: CrownDuelsCard[]): CrownDuelsCard[] {
 	if (isPlayingReveal.value && revealCards.length > 0) {
 		return revealCards;
 	}
@@ -203,27 +207,105 @@ function skipFight() {
 	isPlayingFight.value = false;
 }
 
-// Watch for new round results and play animations
+// Fight animation helpers - determine which cards/zones to highlight
+const fightHighlightSuit = computed(() => {
+	const label = currentFightStep.value?.label ?? '';
+	if (label.includes('♣')) return 'clubs';
+	if (label.includes('♦')) return 'diamonds';
+	if (label.includes('♥')) return 'hearts';
+	if (label.includes('♠')) return 'spades';
+	return null;
+});
+
+const fightHighlightZone = computed(() => {
+	const label = currentFightStep.value?.label ?? '';
+	const type = currentFightStep.value?.type;
+	if (type === 'strength' || label.includes('Weapons') || label.includes('Ignite') || label.includes('Critical') || label.includes('Attack')) {
+		return 'attack';
+	}
+	if (type === 'block' || label.includes('Armour') || label.includes('Ward') || label.includes('Exploit') || label.includes('Defence')) {
+		return 'defence';
+	}
+	if (type === 'damage') return 'royalty';
+	return null;
+});
+
+// Check if a specific card should be highlighted during fight animation
+function isFightHighlighted(card: CrownDuelsCard, zone: Zone, playerId: string): boolean {
+	if (!isPlayingFight.value || !currentFightStep.value) return false;
+	
+	const evt = currentFightStep.value;
+	const highlightZone = fightHighlightZone.value;
+	const highlightSuit = fightHighlightSuit.value;
+	
+	// Only highlight cards for the player mentioned in the event
+	if (evt.playerId !== playerId) return false;
+	
+	// Check if this zone matches
+	if (highlightZone !== zone) return false;
+	
+	// If we have a suit to match, check it
+	if (highlightSuit && card.suit !== highlightSuit) return false;
+	
+	return true;
+}
+
+// Check if royalty should show damage animation
+const fightDamageTarget = computed(() => {
+	if (!isPlayingFight.value) return null;
+	const evt = currentFightStep.value;
+	if (!evt) return null;
+	// Show damage on HIT or Critical Hit events
+	if (evt.type === 'damage' && evt.label.includes('HIT')) {
+		// The OPPONENT of the attacker takes damage
+		return evt.playerId === myPID.value ? oppPID.value : myPID.value;
+	}
+	if (evt.label.includes('Critical Hit')) {
+		return evt.playerId === myPID.value ? oppPID.value : myPID.value;
+	}
+	return null;
+});
+
+// Floating damage number to display
+const fightDamageValue = computed(() => {
+	if (!isPlayingFight.value || !currentFightStep.value) return 0;
+	const evt = currentFightStep.value;
+	if (evt.label.includes('Critical Hit') || (evt.type === 'damage' && evt.label.includes('HIT'))) {
+		return evt.value || 1;
+	}
+	return 0;
+});
+
+// Check if attack line should be shown
+const showAttackLine = computed(() => {
+	if (!isPlayingFight.value || !currentFightStep.value) return false;
+	const label = currentFightStep.value.label;
+	return label.includes('HIT') || label.includes('Critical');
+});
+
+const attackLinePlayerId = computed(() => {
+	if (!showAttackLine.value) return null;
+	return currentFightStep.value?.playerId ?? null;
+});
+
+// During reveal phase, just show the banner briefly then let player confirm
+// No complex animation needed - cards are already face-up in state
+
+// Watch for round results to play fight animation
 let lastSeenRound = 0;
 watch(
 	() => G.value?.lastRoundResult,
 	(result) => {
 		if (result && result.roundNumber > lastSeenRound) {
 			lastSeenRound = result.roundNumber;
-			// Play reveal first, then fight
-			if (result.revealEvents?.length > 0) {
-				startRevealPlayback(result.revealEvents);
+			// Start fight animation after reveal
+			if (result.fightEvents?.length > 0) {
+				// Small delay to let the UI update
+				setTimeout(() => startFightPlayback(result.fightEvents), 300);
 			}
 		}
 	}
 );
-
-// When reveal ends, start fight animation
-watch(isPlayingReveal, (playing) => {
-	if (!playing && G.value?.lastRoundResult?.fightEvents?.length) {
-		setTimeout(() => startFightPlayback(G.value!.lastRoundResult!.fightEvents), 300);
-	}
-});
 
 const me = computed(() => {
 	const pid = myPID.value;
@@ -265,6 +347,72 @@ function isRed(suit: string) {
 function isHidden(c: unknown): c is { hidden: true } {
 	return typeof c === "object" && c !== null && "hidden" in c && (c as any).hidden === true;
 }
+
+// Combat calculation helpers
+function calcWeaponStrength(attackZone: CrownDuelsCard[]): number {
+	const clubs = attackZone.filter((c) => c.suit === "clubs" && !c.faceDown);
+	if (clubs.length === 0) return 0;
+	const highest = Math.max(...clubs.map((c) => c.value));
+	return highest + (clubs.length - 1);
+}
+
+function calcIgniteStrength(attackZone: CrownDuelsCard[]): number {
+	const hearts = attackZone.filter((c) => c.suit === "hearts" && !c.faceDown);
+	const clubs = attackZone.filter((c) => c.suit === "clubs" && !c.faceDown);
+	let total = 0;
+	for (const h of hearts) {
+		total += h.value;
+		if (clubs.some((c) => c.value === h.value)) {
+			total += h.value; // Match bonus
+		}
+	}
+	return total;
+}
+
+function calcArmourBlock(defenceZone: CrownDuelsCard[]): number {
+	const spades = defenceZone.filter((c) => c.suit === "spades" && !c.faceDown);
+	if (spades.length === 0) return 0;
+	const highest = Math.max(...spades.map((c) => c.value));
+	return highest + (spades.length - 1);
+}
+
+function calcWardBlock(defenceZone: CrownDuelsCard[]): number {
+	const hearts = defenceZone.filter((c) => c.suit === "hearts" && !c.faceDown);
+	const spades = defenceZone.filter((c) => c.suit === "spades" && !c.faceDown);
+	let total = 0;
+	for (const h of hearts) {
+		total += h.value;
+		if (spades.some((c) => c.value === h.value)) {
+			total += h.value; // Match bonus
+		}
+	}
+	return total;
+}
+
+// Computed combat values for display
+const myStrength = computed(() => {
+	if (!me.value || !isInRevealPhase.value) return 0;
+	const attack = (me.value.zones.attack ?? []) as CrownDuelsCard[];
+	return calcWeaponStrength(attack) + calcIgniteStrength(attack);
+});
+
+const myBlock = computed(() => {
+	if (!me.value || !isInRevealPhase.value) return 0;
+	const defence = (me.value.zones.defence ?? []) as CrownDuelsCard[];
+	return calcArmourBlock(defence) + calcWardBlock(defence);
+});
+
+const oppStrength = computed(() => {
+	if (!opp.value || !isInRevealPhase.value) return 0;
+	const attack = (opp.value.zones.attack ?? []) as CrownDuelsCard[];
+	return calcWeaponStrength(attack) + calcIgniteStrength(attack);
+});
+
+const oppBlock = computed(() => {
+	if (!opp.value || !isInRevealPhase.value) return 0;
+	const defence = (opp.value.zones.defence ?? []) as CrownDuelsCard[];
+	return calcArmourBlock(defence) + calcWardBlock(defence);
+});
 
 function royalRank(p: PlayerState) {
 	return p.royaltyStack[p.activeRoyalIndex]?.rank?.toUpperCase() ?? "?";
@@ -497,47 +645,56 @@ onBeforeUnmount(() => {
 
 		<!-- ===================== GAME TABLE ===================== -->
 		<div v-else-if="G && me && G.roundNumber > 0" class="table">
-			<!-- Reveal banner (non-blocking) -->
-			<div v-if="isPlayingReveal" class="reveal-banner" @click="skipReveal">
+			<!-- Reveal phase banner -->
+			<!-- <div v-if="isInRevealPhase && !isPlayingFight" class="reveal-banner">
 				<span class="rb-phase">▶ REVEAL</span>
-				<span v-if="currentRevealStep" class="rb-step">{{ REVEAL_STEP_TITLES[currentRevealStep.step] }}</span>
-				<span class="rb-skip">(click to skip)</span>
-			</div>
+				<span class="rb-step">All cards revealed! Review the board, then continue.</span>
+			</div> -->
 
-			<!-- Fight animation overlay -->
-			<Teleport to="body">
-				<div v-if="isPlayingFight" class="phase-overlay fight-overlay" @click="skipFight">
-					<div class="phase-card fight-card">
-						<h2 class="phase-title fight-title">▶ FIGHT</h2>
-						<div class="fight-events">
-							<div
-								v-for="(evt, i) in currentFightStepEvents"
-								:key="i"
-								class="fight-event"
-								:class="{
-									'event-strength': evt.type === 'strength',
-									'event-block': evt.type === 'block',
-									'event-damage': evt.type === 'damage',
-									'event-exploit': evt.type === 'exploit',
-									'event-mine': evt.playerId === myPID,
-								}"
-							>
-								<span class="event-player">{{ evt.playerId === myPID ? 'You' : 'Opponent' }}</span>
-								<span class="event-label">{{ evt.label }}</span>
-								<span v-if="evt.value > 0" class="event-value">+{{ evt.value }}</span>
-								<span class="event-detail">{{ evt.detail }}</span>
-							</div>
-						</div>
-						<p class="phase-skip">Click to skip</p>
-						<div class="phase-progress">
-							<div
-								class="phase-progress-bar fight-progress-bar"
-								:style="{ width: `${((fightStepIndex + 1) / currentFightEvents.length) * 100}%` }"
-							/>
-						</div>
+			<!-- Fight animation banner (on-board, non-blocking) -->
+			<div v-if="isPlayingFight" class="fight-banner" @click="skipFight">
+				<div class="fb-step">Step {{ currentFightStep?.step ?? 1 }}</div>
+				<div class="fb-label">{{ currentFightStep?.label ?? 'Fight!' }}</div>
+				<div class="fb-events">
+					<div
+						v-for="(evt, i) in currentFightStepEvents"
+						:key="i"
+						class="fb-event"
+						:class="{
+							'fb-mine': evt.playerId === myPID,
+							'fb-opp': evt.playerId !== myPID,
+						}"
+					>
+						<span class="fbe-who">{{ evt.playerId === myPID ? 'You' : 'Opp' }}</span>
+						<span v-if="evt.value > 0" class="fbe-val">+{{ evt.value }}</span>
+						<span v-if="evt.detail" class="fbe-detail">{{ evt.detail }}</span>
 					</div>
 				</div>
-			</Teleport>
+				<div class="fb-progress">
+					<div class="fb-progress-bar" :style="{ width: `${((fightStepIndex + 1) / currentFightEvents.length) * 100}%` }" />
+				</div>
+				<span class="fb-skip">click to skip</span>
+			</div>
+
+			<!-- Attack line SVG overlay -->
+			<svg v-if="showAttackLine" class="attack-line-svg">
+				<defs>
+					<linearGradient id="attackGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+						<stop offset="0%" :stop-color="attackLinePlayerId === myPID ? '#ef4444' : '#f97316'" />
+						<stop offset="100%" :stop-color="attackLinePlayerId === myPID ? '#fbbf24' : '#fb923c'" />
+					</linearGradient>
+				</defs>
+				<line
+					:x1="attackLinePlayerId === myPID ? '25%' : '75%'"
+					:y1="attackLinePlayerId === myPID ? '70%' : '30%'"
+					:x2="attackLinePlayerId === myPID ? '50%' : '50%'"
+					:y2="attackLinePlayerId === myPID ? '30%' : '70%'"
+					stroke="url(#attackGrad)"
+					stroke-width="4"
+					stroke-linecap="round"
+					class="attack-line"
+				/>
+			</svg>
 
 			<!-- Round result banner -->
 			<div v-if="G.lastRoundResult && !isPlayingReveal" class="round-banner">
@@ -564,6 +721,10 @@ onBeforeUnmount(() => {
 					<div class="zone-box">
 						<span class="z-lbl">🛡 DEFENCE</span>
 						<div class="z-cards">
+							<div v-if="isInRevealPhase" class="combat-value block-value">
+								<span class="cv-num">{{ oppBlock }}</span>
+								<span class="cv-lbl">BLK</span>
+							</div>
 							<div
 								v-for="c in getDisplayZoneCards(opp?.zones.defence as CrownDuelsCard[], revealOppDefence)"
 								:key="c.id"
@@ -573,6 +734,7 @@ onBeforeUnmount(() => {
 									r: !c.faceDown && !isHidden(c) && isRed(c.suit),
 									'reveal-hl': isRevealHighlighted(c.id),
 									'reveal-discard': currentRevealStep?.type === 'discard' && isRevealHighlighted(c.id),
+									'fight-hl': !isHidden(c) && isFightHighlighted(c as CrownDuelsCard, 'defence', oppPID ?? ''),
 								}"
 							>
 								<template v-if="!c.faceDown && !isHidden(c)">{{ cardTxt(c) }}</template>
@@ -601,12 +763,15 @@ onBeforeUnmount(() => {
 						</div>
 					</div>
 
-					<div class="royal-box">
+					<div class="royal-box" :class="{ 'taking-damage': fightDamageTarget === oppPID }">
 						<template v-if="opp">
 							<span class="royal-rank" :class="{ r: opp.chosenSuit && isRed(opp.chosenSuit) }">
 								{{ royalRank(opp) }}{{ SYM[opp.chosenSuit ?? ""] }}
 							</span>
 							<span class="royal-hp">{{ opp.hp }}/{{ vitality(opp) }}</span>
+							<div v-if="fightDamageTarget === oppPID && fightDamageValue > 0" class="damage-floater">
+								-{{ fightDamageValue }}
+							</div>
 						</template>
 					</div>
 
@@ -643,20 +808,25 @@ onBeforeUnmount(() => {
 									r: !c.faceDown && !isHidden(c) && isRed(c.suit),
 									'reveal-hl': isRevealHighlighted(c.id),
 									'reveal-discard': currentRevealStep?.type === 'discard' && isRevealHighlighted(c.id),
+									'fight-hl': !isHidden(c) && isFightHighlighted(c as CrownDuelsCard, 'attack', oppPID ?? ''),
 								}"
 							>
 								<template v-if="!c.faceDown && !isHidden(c)">{{ cardTxt(c) }}</template>
+							</div>
+							<div v-if="isInRevealPhase" class="combat-value strength-value">
+								<span class="cv-num">{{ oppStrength }}</span>
+								<span class="cv-lbl">STR</span>
 							</div>
 						</div>
 					</div>
 				</div>
 
-				<div class="col-side">
+				<!-- <div class="col-side">
 					<div class="deck-mini">
 						<span class="dm-icon">♛</span>
 						<span class="dm-lbl">HP</span>
 					</div>
-				</div>
+				</div> -->
 			</section>
 
 			<!-- ========== SHARED DECKS ========== -->
@@ -691,21 +861,24 @@ onBeforeUnmount(() => {
 					>
 						<span class="z-lbl">⚔ ATTACK</span>
 						<div class="z-cards">
+							<div v-if="isInRevealPhase" class="combat-value strength-value">
+								<span class="cv-num">{{ myStrength }}</span>
+								<span class="cv-lbl">STR</span>
+							</div>
 							<div
 								v-for="c in getDisplayZoneCards(me.zones.attack as CrownDuelsCard[], revealMyAttack)"
 								:key="c.id"
 								class="cd"
 								:class="{
+									back: c.faceDown,
+									mine: c.faceDown,
 									r: isRed(c.suit),
-									fd: c.faceDown,
 									'reveal-hl': isRevealHighlighted(c.id),
 									'reveal-discard': currentRevealStep?.type === 'discard' && isRevealHighlighted(c.id),
+									'fight-hl': isFightHighlighted(c as CrownDuelsCard, 'attack', myPID ?? ''),
 								}"
 							>
-								{{ cardTxt(c) }}
-								<button v-if="c.faceDown && canPlace && !isPlayingReveal" class="cd-remove" @click.stop="removeCard('attack', me.zones.attack.findIndex((x: CrownDuelsCard) => x.id === c.id))">
-									✕
-								</button>
+								<span class="cd-txt">{{ cardTxt(c) }}</span>
 							</div>
 						</div>
 					</div>
@@ -727,26 +900,27 @@ onBeforeUnmount(() => {
 								:key="c.id"
 								class="cd"
 								:class="{
+									back: c.faceDown,
+									mine: c.faceDown,
 									r: isRed(c.suit),
-									fd: c.faceDown,
 									'reveal-hl': isRevealHighlighted(c.id),
 									'reveal-discard': currentRevealStep?.type === 'discard' && isRevealHighlighted(c.id),
 								}"
 							>
-								{{ cardTxt(c) }}
-								<button v-if="c.faceDown && canPlace && !isPlayingReveal" class="cd-remove" @click.stop="removeCard('spell', me.zones.spell.findIndex((x: CrownDuelsCard) => x.id === c.id))">
-									✕
-								</button>
+								<span class="cd-txt">{{ cardTxt(c) }}</span>
 							</div>
 						</div>
 					</div>
 
-					<div class="royal-box mine">
+					<div class="royal-box mine" :class="{ 'taking-damage': fightDamageTarget === myPID }">
 						<span class="royal-rank" :class="{ r: me.chosenSuit && isRed(me.chosenSuit) }">
 							{{ royalRank(me) }}{{ SYM[me.chosenSuit ?? ""] }}
 						</span>
 						<span class="royal-hp">{{ me.hp }}/{{ vitality(me) }}</span>
 						<span class="royal-lbl">Round {{ G.roundNumber }}</span>
+						<div v-if="fightDamageTarget === myPID && fightDamageValue > 0" class="damage-floater">
+							-{{ fightDamageValue }}
+						</div>
 					</div>
 
 					<div
@@ -765,15 +939,13 @@ onBeforeUnmount(() => {
 								:key="c.id"
 								class="cd"
 								:class="{
+									back: c.faceDown,
+									mine: c.faceDown,
 									r: isRed(c.suit),
-									fd: c.faceDown,
 									'reveal-hl': isRevealHighlighted(c.id),
 								}"
 							>
-								{{ cardTxt(c) }}
-								<button v-if="c.faceDown && canPlace && !isPlayingReveal" class="cd-remove" @click.stop="removeCard('corruption', me.zones.corruption.findIndex((x: CrownDuelsCard) => x.id === c.id))">
-									✕
-								</button>
+								<span class="cd-txt">{{ cardTxt(c) }}</span>
 							</div>
 						</div>
 						<span v-if="me.corruptionStore.length" class="store-n">Store: {{ me.corruptionStore.length }}/{{ vitality(me) }}</span>
@@ -796,34 +968,89 @@ onBeforeUnmount(() => {
 								:key="c.id"
 								class="cd"
 								:class="{
+									back: c.faceDown,
+									mine: c.faceDown,
 									r: isRed(c.suit),
-									fd: c.faceDown,
 									'reveal-hl': isRevealHighlighted(c.id),
 									'reveal-discard': currentRevealStep?.type === 'discard' && isRevealHighlighted(c.id),
+									'fight-hl': isFightHighlighted(c as CrownDuelsCard, 'defence', myPID ?? ''),
 								}"
 							>
-								{{ cardTxt(c) }}
-								<button v-if="c.faceDown && canPlace && !isPlayingReveal" class="cd-remove" @click.stop="removeCard('defence', me.zones.defence.findIndex((x: CrownDuelsCard) => x.id === c.id))">
-									✕
-								</button>
+								<span class="cd-txt">{{ cardTxt(c) }}</span>
+							</div>
+							<div v-if="isInRevealPhase" class="combat-value block-value">
+								<span class="cv-num">{{ myBlock }}</span>
+								<span class="cv-lbl">BLK</span>
 							</div>
 						</div>
 					</div>
 				</div>
 
-				<div class="col-side">
+				<!-- <div class="col-side">
 					<div class="deck-mini hp">
 						<span class="dm-icon">♛</span>
 						<span class="dm-lbl">HP</span>
 					</div>
-				</div>
+				</div> -->
 			</section>
 
 			<!-- ========== STATUS ========== -->
 			<div class="action-bar">
-				<span v-if="me.donePlacing" class="muted">Waiting for opponent…</span>
-				<span v-else-if="!isMyTurn" class="muted">Opponent is placing…</span>
-				<span v-else class="muted turn-hint">Drag cards to place • Keep {{ me.justBecameCorrupt ? 2 : 1 }} in hand</span>
+				<template v-if="isInRevealPhase">
+					<template v-if="me.confirmedReveal">
+						<span class="muted">Waiting for opponent to continue…</span>
+					</template>
+					<template v-else>
+						<button class="confirm-fight-btn" @click="move('confirmReveal')">Continue to Fight ⚔</button>
+					</template>
+				</template>
+				<template v-else>
+					<span v-if="me.donePlacing" class="muted">Waiting for opponent…</span>
+					<span v-else-if="!isMyTurn" class="muted">Opponent is placing…</span>
+					<span v-else class="muted turn-hint">Drag cards to place • Keep {{ me.justBecameCorrupt ? 2 : 1 }} in hand</span>
+				</template>
+				<button class="help-btn" @click="showHelp = !showHelp">{{ showHelp ? "✕" : "?" }}</button>
+			</div>
+
+			<!-- ========== HELP PANEL ========== -->
+			<div v-if="showHelp" class="help-panel">
+				<button class="help-close" @click="showHelp = false">✕</button>
+				<h3 class="help-title">Combat Reference</h3>
+				<div class="help-section">
+					<h4 class="help-subtitle strength">⚔ STRENGTH (Attack Zone)</h4>
+					<p><span class="suit-icon clubs">♣</span> <strong>Weapons:</strong> Highest ♣ value + 1 per other ♣</p>
+					<p>
+						<span class="suit-icon hearts">♥</span> <strong>Ignite:</strong> Each ♥ adds its value.
+						<em>Match bonus: if ♥ matches a ♣, add again</em>
+					</p>
+				</div>
+				<div class="help-section">
+					<h4 class="help-subtitle block">🛡 BLOCK (Defence Zone)</h4>
+					<p><span class="suit-icon spades">♠</span> <strong>Armour:</strong> Highest ♠ value + 1 per other ♠</p>
+					<p>
+						<span class="suit-icon hearts">♥</span> <strong>Ward:</strong> Each ♥ adds its value.
+						<em>Match bonus: if ♥ matches a ♠, add again</em>
+					</p>
+				</div>
+				<div class="help-section">
+					<h4 class="help-subtitle spell">✦ SPELLS (Spell Zone)</h4>
+					<p><span class="suit-icon clubs">♣</span> <strong>All Out Attack:</strong> Block → Strength, then Block = 0</p>
+					<p><span class="suit-icon spades">♠</span> <strong>All Out Defence:</strong> Strength → Block, then Strength = 0</p>
+					<p><span class="suit-icon hearts">♥</span> <strong>Siphon:</strong> Put cards into corruption store</p>
+					<p><span class="suit-icon diamonds">♦</span> <strong>Shatter:</strong> Destroy opponent's ♣/♠ cards</p>
+				</div>
+				<div class="help-section">
+					<h4 class="help-subtitle damage">💥 DAMAGE</h4>
+					<p>Hit if your Strength &gt; opponent's Block</p>
+					<p>
+						<span class="suit-icon diamonds">♦</span> <strong>Critical Hit (Attack):</strong> +1 damage per ♦.
+						<em>Match bonus: +1 if ♦ matches ♣</em>
+					</p>
+					<p>
+						<span class="suit-icon diamonds">♦</span> <strong>Exploit (Defence):</strong> Draw 1 card per ♦ when hit.
+						<em>Match bonus: +1 if ♦ matches ♠</em>
+					</p>
+				</div>
 			</div>
 		</div>
 
@@ -960,6 +1187,7 @@ onBeforeUnmount(() => {
 
 /* ===== TABLE LAYOUT ===== */
 .table {
+	position: relative;
 	flex: 1;
 	display: grid;
 	grid-template-columns: 1fr 3.5rem;
@@ -1043,7 +1271,7 @@ onBeforeUnmount(() => {
 /* ===== PLAYER AREA ===== */
 .area {
 	display: grid;
-	grid-template-columns: 3rem 1fr 1fr 1fr 3rem;
+	grid-template-columns: 3rem 1fr 1fr 1fr; /* 3rem; */
 	gap: 0.25rem;
 	padding: 0.25rem;
 	min-height: 0;
@@ -1112,10 +1340,10 @@ onBeforeUnmount(() => {
 	flex: 1;
 	border: 1px solid #2a2d3a;
 	border-radius: 0.375rem;
-	padding: 0.25rem;
+	padding: 0.5rem;
 	display: flex;
 	flex-direction: column;
-	min-height: 3.5rem;
+	min-height: 9rem;
 	background: #111317;
 	transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
 }
@@ -1150,7 +1378,8 @@ onBeforeUnmount(() => {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 0.2rem;
-	align-items: start;
+	align-items: center;
+	flex: 1;
 }
 
 .store-n {
@@ -1182,16 +1411,100 @@ onBeforeUnmount(() => {
 .cd.back {
 	background: #1a2e24;
 	border-color: #2d5a42;
-	color: transparent;
+}
+.cd.back .cd-txt {
+	display: none;
 }
 .cd.back::after {
 	content: "✦";
 	color: #3d7a5a;
 	font-size: 0.7rem;
 }
-.cd.fd {
-	border-style: dashed;
+/* Your own face-down cards - blue tint to distinguish */
+.cd.back.mine {
+	background: #1a243e;
+	border-color: #2d4a7a;
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+.cd.back.mine::after {
+	color: #4a6a9a;
+}
+/* Peek at your own cards on hover */
+.cd.back.mine:hover {
+	background: #f5f0e6;
 	border-color: #6366f1;
+}
+.cd.back.mine:hover .cd-txt {
+	display: block;
+	color: inherit;
+}
+.cd.back.mine:hover::after {
+	display: none;
+}
+/* Red suit text color on hover */
+.cd.back.mine.r:hover .cd-txt {
+	color: #dc2626;
+}
+
+/* Make ALL cards in Attack/Defence zones much bigger */
+.zone-box:not(.sm) .cd {
+	width: 5rem;
+	height: 7rem;
+	font-size: 1.2rem;
+	border-width: 2px;
+	border-radius: 0.5rem;
+}
+.zone-box:not(.sm) .cd.back::after {
+	font-size: 2rem;
+}
+.zone-box:not(.sm) .z-cards {
+	justify-content: center;
+	gap: 0.75rem;
+}
+
+/* Combat value display (inside zone box) */
+.combat-value {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 0.5rem 0.75rem;
+	border-radius: 0.5rem;
+	min-width: 3rem;
+	height: fit-content;
+	align-self: center;
+}
+.cv-num {
+	font-size: 2rem;
+	font-weight: 800;
+	line-height: 1;
+}
+.cv-lbl {
+	font-size: 0.65rem;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	opacity: 0.8;
+}
+.strength-value {
+	background: linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(220, 38, 38, 0.3) 100%);
+	border: 1px solid rgba(239, 68, 68, 0.5);
+}
+.strength-value .cv-num {
+	color: #ef4444;
+}
+.strength-value .cv-lbl {
+	color: #fca5a5;
+}
+.block-value {
+	background: linear-gradient(135deg, rgba(59, 130, 246, 0.2) 0%, rgba(37, 99, 235, 0.3) 100%);
+	border: 1px solid rgba(59, 130, 246, 0.5);
+}
+.block-value .cv-num {
+	color: #3b82f6;
+}
+.block-value .cv-lbl {
+	color: #93c5fd;
 }
 .cd-remove {
 	position: absolute;
@@ -1323,7 +1636,141 @@ onBeforeUnmount(() => {
 	justify-content: center;
 	padding: 0.35rem;
 	gap: 0.5rem;
+	position: relative;
 }
+.confirm-fight-btn {
+	padding: 0.75rem 2rem;
+	background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+	border: 2px solid #f87171;
+	border-radius: 0.5rem;
+	color: white;
+	font-size: 1.1rem;
+	font-weight: 700;
+	cursor: pointer;
+	transition: all 0.15s ease;
+	box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+}
+.confirm-fight-btn:hover {
+	transform: scale(1.05);
+	box-shadow: 0 6px 20px rgba(239, 68, 68, 0.4);
+}
+.help-btn {
+	position: absolute;
+	right: 1rem;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 1.75rem;
+	height: 1.75rem;
+	border-radius: 50%;
+	background: #334155;
+	border: 1px solid #475569;
+	color: #e2e8f0;
+	font-weight: 700;
+	cursor: pointer;
+	font-size: 0.9rem;
+}
+.help-btn:hover {
+	background: #475569;
+}
+
+/* Help Panel */
+.help-panel {
+	position: absolute;
+	right: 1rem;
+	bottom: 3rem;
+	width: 340px;
+	max-height: 60vh;
+	overflow-y: auto;
+	background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+	border: 1px solid #475569;
+	border-radius: 0.75rem;
+	padding: 1rem;
+	z-index: 50;
+	box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+.help-close {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+	width: 1.5rem;
+	height: 1.5rem;
+	border-radius: 50%;
+	background: #475569;
+	border: none;
+	color: #e2e8f0;
+	font-size: 0.8rem;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+.help-close:hover {
+	background: #64748b;
+}
+.help-title {
+	font-size: 1.1rem;
+	font-weight: 700;
+	color: #fbbf24;
+	margin-bottom: 0.75rem;
+	text-align: center;
+}
+.help-section {
+	margin-bottom: 0.75rem;
+	padding-bottom: 0.75rem;
+	border-bottom: 1px solid #334155;
+}
+.help-section:last-child {
+	border-bottom: none;
+	margin-bottom: 0;
+	padding-bottom: 0;
+}
+.help-subtitle {
+	font-size: 0.85rem;
+	font-weight: 600;
+	margin-bottom: 0.4rem;
+}
+.help-subtitle.strength {
+	color: #ef4444;
+}
+.help-subtitle.block {
+	color: #3b82f6;
+}
+.help-subtitle.spell {
+	color: #a855f7;
+}
+.help-subtitle.damage {
+	color: #f97316;
+}
+.help-section p {
+	font-size: 0.75rem;
+	color: #cbd5e1;
+	margin: 0.25rem 0;
+	line-height: 1.4;
+}
+.help-section em {
+	color: #94a3b8;
+	font-style: italic;
+}
+.help-section strong {
+	color: #f1f5f9;
+}
+.suit-icon {
+	font-weight: 700;
+	margin-right: 0.25rem;
+}
+.suit-icon.clubs {
+	color: #22c55e;
+}
+.suit-icon.spades {
+	color: #3b82f6;
+}
+.suit-icon.hearts {
+	color: #ef4444;
+}
+.suit-icon.diamonds {
+	color: #f97316;
+}
+
 /* ===== DRAG GHOST ===== */
 .drag-ghost-wrapper {
 	user-select: none;
@@ -1364,10 +1811,10 @@ onBeforeUnmount(() => {
 /* ===== REVEAL BANNER ===== */
 .reveal-banner {
 	position: fixed;
-	top: 0;
+	top: 5rem;
 	left: 0;
 	right: 0;
-	z-index: 100;
+	z-index: 50;
 	background: linear-gradient(90deg, #1e293b 0%, #0f172a 50%, #1e293b 100%);
 	border-bottom: 2px solid #fbbf24;
 	padding: 0.75rem 1.5rem;
@@ -1375,7 +1822,7 @@ onBeforeUnmount(() => {
 	align-items: center;
 	justify-content: center;
 	gap: 1rem;
-	cursor: pointer;
+	/* cursor: pointer; */
 	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
 }
 .rb-phase {
@@ -1422,6 +1869,184 @@ onBeforeUnmount(() => {
 	to {
 		box-shadow: 0 0 16px 6px rgba(239, 68, 68, 0.9);
 		opacity: 0.6;
+	}
+}
+
+/* ===== FIGHT BANNER (on-board) ===== */
+.fight-banner {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	z-index: 60;
+	background: linear-gradient(135deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.98) 100%);
+	border: 2px solid #ef4444;
+	border-radius: 1rem;
+	padding: 1rem 2rem;
+	text-align: center;
+	min-width: 280px;
+	box-shadow: 0 0 30px rgba(239, 68, 68, 0.4), 0 0 60px rgba(239, 68, 68, 0.2);
+	cursor: pointer;
+	animation: fight-banner-appear 0.3s ease-out;
+}
+@keyframes fight-banner-appear {
+	from {
+		opacity: 0;
+		transform: translate(-50%, -50%) scale(0.8);
+	}
+	to {
+		opacity: 1;
+		transform: translate(-50%, -50%) scale(1);
+	}
+}
+.fb-step {
+	font-size: 0.7rem;
+	color: #94a3b8;
+	text-transform: uppercase;
+	letter-spacing: 0.1em;
+	margin-bottom: 0.25rem;
+}
+.fb-label {
+	font-size: 1.4rem;
+	font-weight: 700;
+	color: #ef4444;
+	margin-bottom: 0.5rem;
+	text-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+}
+.fb-events {
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+	margin-bottom: 0.75rem;
+}
+.fb-event {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.5rem;
+	font-size: 0.85rem;
+	padding: 0.25rem 0.5rem;
+	border-radius: 0.25rem;
+}
+.fb-event.fb-mine {
+	background: rgba(59, 130, 246, 0.2);
+	border-left: 3px solid #3b82f6;
+}
+.fb-event.fb-opp {
+	background: rgba(249, 115, 22, 0.2);
+	border-left: 3px solid #f97316;
+}
+.fbe-who {
+	font-weight: 600;
+	color: #e2e8f0;
+	min-width: 2.5rem;
+}
+.fbe-val {
+	font-weight: 700;
+	color: #fbbf24;
+	font-size: 1rem;
+}
+.fbe-detail {
+	font-size: 0.75rem;
+	color: #94a3b8;
+}
+.fb-progress {
+	height: 3px;
+	background: #334155;
+	border-radius: 2px;
+	overflow: hidden;
+	margin-bottom: 0.5rem;
+}
+.fb-progress-bar {
+	height: 100%;
+	background: linear-gradient(90deg, #ef4444, #f97316);
+	transition: width 0.3s ease;
+}
+.fb-skip {
+	font-size: 0.65rem;
+	color: #64748b;
+	text-transform: uppercase;
+}
+
+/* ===== FIGHT CARD HIGHLIGHT ===== */
+.cd.fight-hl {
+	animation: fight-pulse 0.6s ease-in-out infinite alternate;
+	box-shadow: 0 0 15px 5px rgba(239, 68, 68, 0.7);
+	z-index: 10;
+}
+@keyframes fight-pulse {
+	from {
+		box-shadow: 0 0 10px 3px rgba(239, 68, 68, 0.5);
+		transform: scale(1);
+	}
+	to {
+		box-shadow: 0 0 20px 8px rgba(239, 68, 68, 0.9);
+		transform: scale(1.08);
+	}
+}
+
+/* ===== DAMAGE FLOATER ===== */
+.royal-box {
+	position: relative;
+}
+.royal-box.taking-damage {
+	animation: damage-shake 0.15s ease-in-out 3;
+}
+@keyframes damage-shake {
+	0%, 100% { transform: translateX(0); }
+	25% { transform: translateX(-4px); }
+	75% { transform: translateX(4px); }
+}
+.damage-floater {
+	position: absolute;
+	top: -1rem;
+	left: 50%;
+	transform: translateX(-50%);
+	font-size: 1.8rem;
+	font-weight: 900;
+	color: #ef4444;
+	text-shadow: 0 0 10px rgba(239, 68, 68, 0.8), 2px 2px 0 #000;
+	animation: damage-float 1.5s ease-out forwards;
+	z-index: 100;
+}
+@keyframes damage-float {
+	0% {
+		opacity: 1;
+		transform: translateX(-50%) translateY(0) scale(0.5);
+	}
+	20% {
+		transform: translateX(-50%) translateY(-10px) scale(1.2);
+	}
+	100% {
+		opacity: 0;
+		transform: translateX(-50%) translateY(-40px) scale(1);
+	}
+}
+
+/* ===== ATTACK LINE SVG ===== */
+.attack-line-svg {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	z-index: 55;
+}
+.attack-line {
+	stroke-dasharray: 20 10;
+	animation: attack-dash 0.4s linear infinite, attack-glow 0.3s ease-in-out infinite alternate;
+}
+@keyframes attack-dash {
+	to {
+		stroke-dashoffset: -30;
+	}
+}
+@keyframes attack-glow {
+	from {
+		filter: drop-shadow(0 0 3px rgba(239, 68, 68, 0.5));
+	}
+	to {
+		filter: drop-shadow(0 0 8px rgba(239, 68, 68, 0.9));
 	}
 }
 

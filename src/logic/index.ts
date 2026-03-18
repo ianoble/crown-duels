@@ -108,6 +108,13 @@ export const gameDef = defineGame<CrownDuelsState>({
 			return true;
 		}
 
+		if (moveName === 'confirmReveal') {
+			const player = G.players[playerID] as any;
+			if (!player) return 'Player not found';
+			if (player.confirmedReveal) return 'Already confirmed reveal';
+			return true;
+		}
+
 		return 'Unknown move';
 	},
 });

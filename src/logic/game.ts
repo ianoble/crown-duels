@@ -10,7 +10,7 @@ import {
 	shuffle,
 	isJoker,
 } from './cards';
-import { resolveRound, cleanupRound, getActiveVitality } from './resolution';
+import { resolveRound, resolveReveal, cleanupRound, getActiveVitality } from './resolution';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -38,6 +38,7 @@ function createPlayer(): PlayerState {
 		hasJester: false,
 		justBecameCorrupt: false,
 		donePlacing: false,
+		confirmedReveal: false,
 	};
 }
 
@@ -52,6 +53,7 @@ function setup(ctx: Ctx): CrownDuelsState {
 		discardPile: [],
 		roundNumber: 0,
 		lastRoundResult: null,
+		pendingRevealEvents: null,
 		gameWinner: null,
 		history: [],
 	};
@@ -246,10 +248,12 @@ function placeCard(
 	const allDone = pids.every((id) => G.players[id].donePlacing);
 
 	if (allDone) {
-		executeRoundResolution(G);
-		if (G.gameWinner !== null) return;
-		prepareNextRound(G);
-		events.endTurn();
+		// Discard remaining hand cards
+		discardRemainingHands(G);
+		// Run reveal phase (flip cards, discard invalid ones)
+		executeRevealOnly(G);
+		// Transition to reveal phase for confirmation
+		events.setPhase('reveal');
 	} else {
 		const nextPid = getNextPlayer(G, pid);
 		if (nextPid && nextPid !== pid) {
@@ -293,10 +297,35 @@ function confirmPlacement(
 	const allDone = pids.every((id) => G.players[id].donePlacing);
 
 	if (allDone) {
-		executeRoundResolution(G);
+		// Discard remaining hand cards
+		discardRemainingHands(G);
+		// Run reveal phase (flip cards, discard invalid ones)
+		executeRevealOnly(G);
+		// Transition to reveal phase for confirmation
+		events.setPhase('reveal');
+	} else {
+		events.endTurn();
+	}
+}
+
+function confirmReveal(
+	{ G, ctx, events }: { G: CrownDuelsState; ctx: Ctx; events: any },
+) {
+	const pid = ctx.currentPlayer;
+	const player = G.players[pid];
+	if (player.confirmedReveal) return INVALID_MOVE;
+
+	player.confirmedReveal = true;
+
+	const pids = Object.keys(G.players);
+	const allConfirmed = pids.every((id) => G.players[id].confirmedReveal);
+
+	if (allConfirmed) {
+		// Run fight phase and cleanup
+		executeFightAndCleanup(G);
 		if (G.gameWinner !== null) return;
 		prepareNextRound(G);
-		events.endTurn();
+		events.setPhase('placement');
 	} else {
 		events.endTurn();
 	}
@@ -306,12 +335,22 @@ function confirmPlacement(
 // Round resolution & preparation
 // ---------------------------------------------------------------------------
 
-function executeRoundResolution(G: CrownDuelsState): void {
-	// Discard remaining hand cards before resolution
-	discardRemainingHands(G);
+function executeRevealOnly(G: CrownDuelsState): void {
+	// Run reveal: flip cards, discard invalid ones, store events for animation
+	const revealEvents = resolveReveal(G);
+	// Store reveal events for UI animation
+	G.pendingRevealEvents = revealEvents;
+}
 
-	// Resolve: Reveal → Fight (with ♣/♠ spells) → Cast Spells (♥ Siphon, ♦ Shatter) → Damage
+function executeFightAndCleanup(G: CrownDuelsState): void {
+	// Get pending reveal events
+	const pendingRevealEvents = G.pendingRevealEvents ?? [];
+	G.pendingRevealEvents = null;
+
+	// Resolve: Fight (with ♣/♠ spells) → Cast Spells (♥ Siphon, ♦ Shatter) → Damage
 	const result = resolveRound(G);
+	// Merge in the reveal events from earlier
+	result.revealEvents = pendingRevealEvents;
 	G.lastRoundResult = result;
 
 	// Clean Up: discard per-round cards, handle royal defeat, draw, corruption
@@ -324,6 +363,7 @@ function prepareNextRound(G: CrownDuelsState): void {
 	for (const pid of Object.keys(G.players)) {
 		const p = G.players[pid];
 		p.donePlacing = false;
+		p.confirmedReveal = false;
 		// justBecameCorrupt lasts only one round (the Plot phase restriction)
 		p.justBecameCorrupt = false;
 	}
@@ -354,6 +394,13 @@ export const CrownDuelsGame: Game<CrownDuelsState> = {
 				maxMoves: 99,
 			},
 			moves: { placeCard, removeFromZone, confirmPlacement },
+		},
+		reveal: {
+			turn: {
+				minMoves: 1,
+				maxMoves: 1,
+			},
+			moves: { confirmReveal },
 		},
 	},
 

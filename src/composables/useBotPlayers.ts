@@ -27,6 +27,7 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 		chooseSuit?: (suit: string) => void;
 		placeCard?: (handIndex: number, zone: string) => void;
 		confirmPlacement?: () => void;
+		confirmReveal?: () => void;
 	};
 
 	function makeSuitSelectionMove(client: ReturnType<typeof Client>, state: unknown, botPlayerID: string) {
@@ -102,6 +103,28 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 		}
 	}
 
+	function makeRevealMove(client: ReturnType<typeof Client>, state: unknown, botPlayerID: string) {
+		const s = state as {
+			G?: CrownDuelsState;
+			ctx?: { phase?: string; currentPlayer?: string };
+		};
+		const G = s.G;
+		const ctx = s.ctx;
+		const moves = (client as unknown as { moves?: ClientMoves }).moves;
+
+		if (ctx?.phase !== 'reveal' || !moves?.confirmReveal) return;
+		if (ctx.currentPlayer !== botPlayerID) return;
+
+		const botPlayer = G?.players?.[botPlayerID];
+		if (!botPlayer) return;
+
+		// If already confirmed, nothing to do
+		if (botPlayer.confirmedReveal) return;
+
+		console.log(`[Crown Duels Bot ${botPlayerID}] Confirming reveal (continue to fight)`);
+		moves.confirmReveal();
+	}
+
 	function startBots(matchID: string) {
 		stopBots();
 		const creds = getBotCreds(matchID);
@@ -123,6 +146,7 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 			let lastCurrent = '';
 			let lastPhase = '';
 			let lastHandLen = -1;
+			let lastConfirmedReveal = false;
 
 			client.subscribe((state) => {
 				const ctx = state?.ctx as {
@@ -142,13 +166,15 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 
 				const G = state?.G as CrownDuelsState | undefined;
 				const handLen = G?.players?.[botPlayerID]?.hand?.length ?? -1;
+				const confirmedReveal = G?.players?.[botPlayerID]?.confirmedReveal ?? false;
 
-				// React when turn, phase, or hand length changes
+				// React when turn, phase, hand length, or confirmedReveal changes
 				if (
 					turn === lastTurn &&
 					currentPlayer === lastCurrent &&
 					phase === lastPhase &&
-					handLen === lastHandLen
+					handLen === lastHandLen &&
+					confirmedReveal === lastConfirmedReveal
 				) {
 					return;
 				}
@@ -157,6 +183,7 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 				lastCurrent = currentPlayer;
 				lastPhase = phase;
 				lastHandLen = handLen;
+				lastConfirmedReveal = confirmedReveal;
 
 				// Add a small delay so the UI can update
 				setTimeout(() => {
@@ -164,6 +191,8 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 						makeSuitSelectionMove(client, state, botPlayerID);
 					} else if (phase === 'placement') {
 						makePlacementMove(client, state, botPlayerID);
+					} else if (phase === 'reveal') {
+						makeRevealMove(client, state, botPlayerID);
 					}
 				}, 300);
 			});
