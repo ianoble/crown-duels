@@ -538,7 +538,14 @@ onUnmounted(stopPolling);
 						<h1 class="text-4xl font-bold tracking-tight">{{ gameDef.displayName }}</h1>
 						<p class="mt-2 text-slate-400">{{ gameDef.description }}</p>
 					</div>
-					<div v-if="isLoggedIn" class="flex items-center gap-3 shrink-0">
+					<div class="flex items-center gap-3 shrink-0">
+						<RouterLink
+							to="/rules"
+							class="px-3 py-1.5 text-xs text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500 rounded-lg transition-colors"
+						>
+							How to Play
+						</RouterLink>
+					<template v-if="isLoggedIn">
 						<span class="text-sm text-slate-400">Signed in as <strong class="text-white">{{ playerName }}</strong></span>
 						<button
 							class="px-3 py-1.5 text-xs text-slate-500 hover:text-slate-300 border border-slate-700 hover:border-slate-600 rounded-lg transition-colors"
@@ -546,6 +553,7 @@ onUnmounted(stopPolling);
 						>
 							Sign Out
 						</button>
+					</template>
 					</div>
 				</div>
 			</div>
