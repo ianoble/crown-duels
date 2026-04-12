@@ -1,8 +1,17 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useGame, useCardDrag } from "@engine/client";
-import type { CrownDuelsState, CrownDuelsCard, Zone, PlayerState, RevealEvent, FightEvent } from "../logic/index";
+import type {
+	CrownDuelsState,
+	CrownDuelsCard,
+	Zone,
+	PlayerState,
+	PlayerZones,
+	RevealEvent,
+	FightEvent,
+} from "../logic/index";
 import { ZONES, ROYAL_VITALITY } from "../logic/index";
+import { handCardTooltipLines } from "../logic/handCardTooltip";
 import type { VisibleCard } from "@engine/client/index";
 
 defineProps<{ headerHeight: number }>();
@@ -13,12 +22,38 @@ const { registerDropZone, unregisterDropZone, startDrag, state: dragState, onDro
 
 const G = computed(() => state.value as unknown as CrownDuelsState | undefined);
 const myPID = computed(() => playerID?.value ?? null);
-const currentPhase = computed(() => ctx.value?.phase ?? "placement");
 
-// Backup check: if pendingRevealEvents exists, we're in reveal phase
-const isInRevealPhase = computed(() => {
-	return currentPhase.value === "reveal" || (G.value?.pendingRevealEvents && G.value.pendingRevealEvents.length > 0);
+/**
+ * Phase for all UI (action bar, hand tray). Prefer ctx.phase; when boardgame.io omits it on the client,
+ * infer from player flags so we never sit on "Syncing…" with no hand during normal play.
+ */
+const currentPhase = computed((): string | undefined => {
+	const fromCtx = ctx.value?.phase;
+	if (fromCtx) return fromCtx;
+
+	const g = G.value;
+	if (!g || g.roundNumber <= 0) return undefined;
+
+	const players = g.players;
+	const pids = Object.keys(players);
+	if (pids.length === 0) return undefined;
+
+	if ((g.pendingRevealEvents?.length ?? 0) > 0) return "reveal";
+
+	const anyNotDonePlacing = pids.some((id) => !players[id].donePlacing);
+	if (anyNotDonePlacing) return "placement";
+
+	const allRevealDone = pids.every((id) => players[id].confirmedReveal);
+	if (!allRevealDone) return "reveal";
+
+	const allFightDone = pids.every((id) => players[id].confirmedFightDone);
+	if (!allFightDone && g.lastRoundResult != null) return "fightResolution";
+
+	return "placement";
 });
+
+const isInRevealPhase = computed(() => currentPhase.value === "reveal");
+const isInFightResolutionPhase = computed(() => currentPhase.value === "fightResolution");
 const showHelp = ref(false);
 
 // Reveal animation state
@@ -207,6 +242,29 @@ function skipFight() {
 	isPlayingFight.value = false;
 }
 
+/**
+ * STR/BLK badges: reveal; fight animation (snapshot); fightResolution (live zones — cleanup not run yet).
+ */
+const showCombatBadges = computed(() => {
+	if (isInRevealPhase.value) return true;
+	if (isPlayingFight.value && G.value?.lastRoundResult?.fightBoardSnapshot) return true;
+	if (isInFightResolutionPhase.value) return true;
+	return false;
+});
+
+function fightBoardZones(pid: string | null): PlayerZones | null {
+	if (!isPlayingFight.value || pid == null) return null;
+	return G.value?.lastRoundResult?.fightBoardSnapshot?.[pid] ?? null;
+}
+
+/** Zone cards for display: fight animation uses pre-cleanup snapshot; otherwise live zones. */
+function zoneCardsForDisplay(pid: string | null, zone: Zone): CrownDuelsCard[] {
+	if (pid == null) return [];
+	const snap = fightBoardZones(pid);
+	if (snap) return (snap[zone] ?? []) as CrownDuelsCard[];
+	return (G.value?.players[pid]?.zones[zone] ?? []) as CrownDuelsCard[];
+}
+
 // Fight animation helpers - determine which cards/zones to highlight
 const fightHighlightSuit = computed(() => {
 	const label = currentFightStep.value?.label ?? '';
@@ -325,7 +383,19 @@ const opp = computed(() => {
 	return G.value.players[oid] ?? null;
 });
 
-const canPlace = computed(() => isMyTurn.value && me.value && !me.value.donePlacing);
+const canPlace = computed(
+	() =>
+		currentPhase.value === "placement" && isMyTurn.value && me.value && !me.value.donePlacing
+);
+
+const isInPlacementPhase = computed(() => currentPhase.value === "placement");
+
+/** Hand at or below keep limit — must use confirmPlacement (no placeCard), including empty hand. */
+const canConfirmPlacement = computed(() => {
+	if (!canPlace.value || !me.value) return false;
+	const keep = me.value.justBecameCorrupt ? 2 : 1;
+	return myHand.value.length <= keep;
+});
 
 const SYM: Record<string, string> = {
 	hearts: "♥",
@@ -391,26 +461,26 @@ function calcWardBlock(defenceZone: CrownDuelsCard[]): number {
 
 // Computed combat values for display
 const myStrength = computed(() => {
-	if (!me.value || !isInRevealPhase.value) return 0;
-	const attack = (me.value.zones.attack ?? []) as CrownDuelsCard[];
+	if (!me.value || myPID.value == null || !showCombatBadges.value) return 0;
+	const attack = zoneCardsForDisplay(myPID.value, "attack");
 	return calcWeaponStrength(attack) + calcIgniteStrength(attack);
 });
 
 const myBlock = computed(() => {
-	if (!me.value || !isInRevealPhase.value) return 0;
-	const defence = (me.value.zones.defence ?? []) as CrownDuelsCard[];
+	if (!me.value || myPID.value == null || !showCombatBadges.value) return 0;
+	const defence = zoneCardsForDisplay(myPID.value, "defence");
 	return calcArmourBlock(defence) + calcWardBlock(defence);
 });
 
 const oppStrength = computed(() => {
-	if (!opp.value || !isInRevealPhase.value) return 0;
-	const attack = (opp.value.zones.attack ?? []) as CrownDuelsCard[];
+	if (!opp.value || oppPID.value == null || !showCombatBadges.value) return 0;
+	const attack = zoneCardsForDisplay(oppPID.value, "attack");
 	return calcWeaponStrength(attack) + calcIgniteStrength(attack);
 });
 
 const oppBlock = computed(() => {
-	if (!opp.value || !isInRevealPhase.value) return 0;
-	const defence = (opp.value.zones.defence ?? []) as CrownDuelsCard[];
+	if (!opp.value || oppPID.value == null || !showCombatBadges.value) return 0;
+	const defence = zoneCardsForDisplay(oppPID.value, "defence");
 	return calcArmourBlock(defence) + calcWardBlock(defence);
 });
 
@@ -721,12 +791,12 @@ onBeforeUnmount(() => {
 					<div class="zone-box">
 						<span class="z-lbl">🛡 DEFENCE</span>
 						<div class="z-cards">
-							<div v-if="isInRevealPhase" class="combat-value block-value">
+							<div v-if="showCombatBadges" class="combat-value block-value">
 								<span class="cv-num">{{ oppBlock }}</span>
 								<span class="cv-lbl">BLK</span>
 							</div>
 							<div
-								v-for="c in getDisplayZoneCards(opp?.zones.defence as CrownDuelsCard[], revealOppDefence)"
+								v-for="c in getDisplayZoneCards(zoneCardsForDisplay(oppPID, 'defence'), revealOppDefence)"
 								:key="c.id"
 								class="cd"
 								:class="{
@@ -748,7 +818,7 @@ onBeforeUnmount(() => {
 						<span class="z-lbl">✦ SPELL</span>
 						<div class="z-cards">
 							<div
-								v-for="c in getDisplayZoneCards(opp?.zones.spell as CrownDuelsCard[], revealOppSpell)"
+								v-for="c in getDisplayZoneCards(zoneCardsForDisplay(oppPID, 'spell'), revealOppSpell)"
 								:key="c.id"
 								class="cd"
 								:class="{
@@ -769,6 +839,7 @@ onBeforeUnmount(() => {
 								{{ royalRank(opp) }}{{ SYM[opp.chosenSuit ?? ""] }}
 							</span>
 							<span class="royal-hp">{{ opp.hp }}/{{ vitality(opp) }}</span>
+							<span v-if="isInPlacementPhase" class="opp-hand-count">{{ opp.hand.length }} in hand</span>
 							<div v-if="fightDamageTarget === oppPID && fightDamageValue > 0" class="damage-floater">
 								-{{ fightDamageValue }}
 							</div>
@@ -779,7 +850,7 @@ onBeforeUnmount(() => {
 						<span class="z-lbl">☠ CORRUPTION</span>
 						<div class="z-cards">
 							<div
-								v-for="c in getDisplayZoneCards(opp?.zones.corruption as CrownDuelsCard[], revealOppCorruption)"
+								v-for="c in getDisplayZoneCards(zoneCardsForDisplay(oppPID, 'corruption'), revealOppCorruption)"
 								:key="c.id"
 								class="cd"
 								:class="{
@@ -800,7 +871,7 @@ onBeforeUnmount(() => {
 						<span class="z-lbl">⚔ ATTACK</span>
 						<div class="z-cards">
 							<div
-								v-for="c in getDisplayZoneCards(opp?.zones.attack as CrownDuelsCard[], revealOppAttack)"
+								v-for="c in getDisplayZoneCards(zoneCardsForDisplay(oppPID, 'attack'), revealOppAttack)"
 								:key="c.id"
 								class="cd"
 								:class="{
@@ -813,7 +884,7 @@ onBeforeUnmount(() => {
 							>
 								<template v-if="!c.faceDown && !isHidden(c)">{{ cardTxt(c) }}</template>
 							</div>
-							<div v-if="isInRevealPhase" class="combat-value strength-value">
+							<div v-if="showCombatBadges" class="combat-value strength-value">
 								<span class="cv-num">{{ oppStrength }}</span>
 								<span class="cv-lbl">STR</span>
 							</div>
@@ -861,12 +932,12 @@ onBeforeUnmount(() => {
 					>
 						<span class="z-lbl">⚔ ATTACK</span>
 						<div class="z-cards">
-							<div v-if="isInRevealPhase" class="combat-value strength-value">
+							<div v-if="showCombatBadges" class="combat-value strength-value">
 								<span class="cv-num">{{ myStrength }}</span>
 								<span class="cv-lbl">STR</span>
 							</div>
 							<div
-								v-for="c in getDisplayZoneCards(me.zones.attack as CrownDuelsCard[], revealMyAttack)"
+								v-for="c in getDisplayZoneCards(zoneCardsForDisplay(myPID, 'attack'), revealMyAttack)"
 								:key="c.id"
 								class="cd"
 								:class="{
@@ -896,7 +967,7 @@ onBeforeUnmount(() => {
 						<span class="z-lbl">✦ SPELL</span>
 						<div class="z-cards">
 							<div
-								v-for="c in getDisplayZoneCards(me.zones.spell as CrownDuelsCard[], revealMySpell)"
+								v-for="c in getDisplayZoneCards(zoneCardsForDisplay(myPID, 'spell'), revealMySpell)"
 								:key="c.id"
 								class="cd"
 								:class="{
@@ -935,7 +1006,7 @@ onBeforeUnmount(() => {
 						<span class="z-lbl">☠ CORRUPTION</span>
 						<div class="z-cards">
 							<div
-								v-for="c in getDisplayZoneCards(me.zones.corruption as CrownDuelsCard[], revealMyCorruption)"
+								v-for="c in getDisplayZoneCards(zoneCardsForDisplay(myPID, 'corruption'), revealMyCorruption)"
 								:key="c.id"
 								class="cd"
 								:class="{
@@ -964,7 +1035,7 @@ onBeforeUnmount(() => {
 						<span class="z-lbl">🛡 DEFENCE</span>
 						<div class="z-cards">
 							<div
-								v-for="c in getDisplayZoneCards(me.zones.defence as CrownDuelsCard[], revealMyDefence)"
+								v-for="c in getDisplayZoneCards(zoneCardsForDisplay(myPID, 'defence'), revealMyDefence)"
 								:key="c.id"
 								class="cd"
 								:class="{
@@ -978,7 +1049,7 @@ onBeforeUnmount(() => {
 							>
 								<span class="cd-txt">{{ cardTxt(c) }}</span>
 							</div>
-							<div v-if="isInRevealPhase" class="combat-value block-value">
+							<div v-if="showCombatBadges" class="combat-value block-value">
 								<span class="cv-num">{{ myBlock }}</span>
 								<span class="cv-lbl">BLK</span>
 							</div>
@@ -1004,10 +1075,40 @@ onBeforeUnmount(() => {
 						<button class="confirm-fight-btn" @click="move('confirmReveal')">Continue to Fight ⚔</button>
 					</template>
 				</template>
-				<template v-else>
-					<span v-if="me.donePlacing" class="muted">Waiting for opponent…</span>
+				<template v-else-if="isInFightResolutionPhase">
+					<template v-if="me.confirmedFightDone">
+						<span class="muted">Waiting for opponent to finish fight summary…</span>
+					</template>
+					<template v-else>
+						<button
+							type="button"
+							class="confirm-fight-btn"
+							:disabled="isPlayingFight"
+							@click="move('ackFightComplete')"
+						>
+							{{ isPlayingFight ? "Fight in progress…" : "Continue after fight ✓" }}
+						</button>
+					</template>
+				</template>
+				<template v-else-if="isInPlacementPhase">
+					<span v-if="me.donePlacing && !isMyTurn" class="muted">Waiting for opponent…</span>
 					<span v-else-if="!isMyTurn" class="muted">Opponent is placing…</span>
-					<span v-else class="muted turn-hint">Drag cards to place • Keep {{ me.justBecameCorrupt ? 2 : 1 }} in hand</span>
+					<template v-else>
+						<button
+							v-if="canConfirmPlacement"
+							type="button"
+							class="confirm-fight-btn"
+							@click="move('confirmPlacement')"
+						>
+							Done placing
+						</button>
+						<span v-else class="muted turn-hint">
+							Drag cards to place • Keep {{ me.justBecameCorrupt ? 2 : 1 }} in hand
+						</span>
+					</template>
+				</template>
+				<template v-else>
+					<span class="muted">Syncing game phase…</span>
 				</template>
 				<button class="help-btn" @click="showHelp = !showHelp">{{ showHelp ? "✕" : "?" }}</button>
 			</div>
@@ -1055,7 +1156,7 @@ onBeforeUnmount(() => {
 		</div>
 
 		<!-- ========== HAND (teleported to fixed tray, only during game) ========== -->
-		<Teleport v-if="G && G.roundNumber > 0" to="#game-hand-tray">
+		<Teleport v-if="G && G.roundNumber > 0 && currentPhase === 'placement'" to="#game-hand-tray">
 			<div
 				class="hand-tray flex flex-col items-center justify-end py-3 px-4 pointer-events-auto"
 				:class="{ 'hand-tray-dragging': dragState.isDragging }"
@@ -1086,6 +1187,20 @@ onBeforeUnmount(() => {
 						@mouseenter="hoveredHandIndex = idx"
 						@mouseleave="hoveredHandIndex = null"
 					>
+						<div v-if="hoveredHandIndex === idx" class="hand-card-tooltip" aria-hidden="true">
+							<template v-if="isHidden(card)">
+								<p class="hand-card-tooltip-line">Hidden card</p>
+							</template>
+							<template v-else>
+								<p
+									v-for="(line, li) in handCardTooltipLines(card as CrownDuelsCard)"
+									:key="li"
+									class="hand-card-tooltip-line"
+								>
+									{{ line }}
+								</p>
+							</template>
+						</div>
 						<template v-if="isHidden(card)">
 							<span class="text-slate-500 text-2xl">🂠</span>
 						</template>
@@ -1557,6 +1672,12 @@ onBeforeUnmount(() => {
 	color: #ef4444;
 	font-weight: 700;
 }
+.opp-hand-count {
+	font-size: 0.55rem;
+	color: #a1a1aa;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+}
 .royal-lbl {
 	font-size: 0.5rem;
 	color: #71717a;
@@ -1597,9 +1718,40 @@ onBeforeUnmount(() => {
 
 /* ===== HAND CARD ===== */
 .hand-card {
+	position: relative;
 	width: 5.5rem;
 	aspect-ratio: 2.5 / 3.5;
 	will-change: transform;
+}
+.hand-card-tooltip {
+	position: absolute;
+	bottom: 100%;
+	left: 50%;
+	transform: translateX(-50%);
+	margin-bottom: 0.35rem;
+	min-width: 10rem;
+	max-width: 16rem;
+	padding: 0.5rem 0.65rem;
+	background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+	border: 1px solid #475569;
+	border-radius: 0.5rem;
+	font-size: 0.65rem;
+	line-height: 1.35;
+	color: #e2e8f0;
+	z-index: 200;
+	pointer-events: none;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+	text-align: left;
+}
+.hand-card-tooltip-line {
+	margin: 0 0 0.35rem 0;
+}
+.hand-card-tooltip-line:last-child {
+	margin-bottom: 0;
+}
+.hand-card-tooltip-line:first-child {
+	font-weight: 700;
+	color: #fbbf24;
 }
 .hand-card.card-red {
 	color: #dc2626;

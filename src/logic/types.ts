@@ -67,6 +67,8 @@ export interface PlayerState {
 	donePlacing: boolean;
 	/** Whether this player has confirmed seeing the revealed cards. */
 	confirmedReveal: boolean;
+	/** Whether this player has finished viewing the fight resolution (cleanup + next hand). */
+	confirmedFightDone: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +118,11 @@ export interface RoundResult {
 	revealEvents: RevealEvent[];
 	/** Step-by-step fight events for animation playback */
 	fightEvents: FightEvent[];
+	/**
+	 * Zones immediately after reveal resolution, before fight spells / damage / cleanup.
+	 * Lets the client replay the fight while showing the same board the players confirmed.
+	 */
+	fightBoardSnapshot?: Record<string, PlayerZones>;
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,18 @@ import { CrownDuelsGame } from './game';
 import type { CrownDuelsState, CrownDuelsCard } from './types';
 import { ZONES } from './types';
 
-export type { CrownDuelsState, CrownDuelsCard, PlayerState, Zone, Suit, RoundResult, FightDetail, RevealEvent, FightEvent } from './types';
+export type {
+	CrownDuelsState,
+	CrownDuelsCard,
+	PlayerState,
+	PlayerZones,
+	Zone,
+	Suit,
+	RoundResult,
+	FightDetail,
+	RevealEvent,
+	FightEvent,
+} from './types';
 export { PLAYER_COLORS, SUITS, ZONES, ROYAL_VITALITY } from './types';
 export type { PlayerColor } from './types';
 
@@ -105,6 +116,11 @@ export const gameDef = defineGame<CrownDuelsState>({
 		}
 
 		if (moveName === 'confirmPlacement') {
+			const player = G.players[playerID] as any;
+			if (!player) return 'Player not found';
+			if (player.donePlacing) return 'Already finished placing';
+			const keep = player.justBecameCorrupt ? 2 : 1;
+			if (player.hand.length > keep) return 'Place cards until your hand is at or below your keep limit';
 			return true;
 		}
 
@@ -112,6 +128,13 @@ export const gameDef = defineGame<CrownDuelsState>({
 			const player = G.players[playerID] as any;
 			if (!player) return 'Player not found';
 			if (player.confirmedReveal) return 'Already confirmed reveal';
+			return true;
+		}
+
+		if (moveName === 'ackFightComplete') {
+			const player = G.players[playerID] as any;
+			if (!player) return 'Player not found';
+			if (player.confirmedFightDone) return 'Already acknowledged fight';
 			return true;
 		}
 

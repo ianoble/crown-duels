@@ -1,10 +1,22 @@
 import { watch, onUnmounted, type Ref } from 'vue';
 import { Client } from 'boardgame.io/client';
 import { SocketIO } from 'boardgame.io/multiplayer';
+import { useToast } from '@engine/client';
 import { gameDef } from '../logic/index';
 import type { CrownDuelsState, Zone } from '../logic/types';
 import { SUITS, ZONES } from '../logic/types';
 import { SERVER_URL } from '../config';
+
+/** Slower pacing during placement so the human can follow bot moves. */
+const BOT_DELAY_SUIT_MS = 450;
+const BOT_DELAY_PLACEMENT_MS = 1000;
+
+const ZONE_TOAST_LABEL: Record<Zone, string> = {
+	attack: 'Attack',
+	defence: 'Defence',
+	spell: 'Spell',
+	corruption: 'Corruption',
+};
 
 /**
  * Crown Duels bots:
@@ -12,7 +24,13 @@ import { SERVER_URL } from '../config';
  * - Placement phase: Place cards randomly, then confirm
  */
 export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<string>) {
-	const botClients: Array<{ playerID: string; client: ReturnType<typeof Client> }> = [];
+	const { showToast } = useToast();
+
+	const botClients: Array<{
+		playerID: string;
+		client: ReturnType<typeof Client>;
+		cancelDeferred: () => void;
+	}> = [];
 
 	function getBotCreds(matchID: string): Record<string, string> {
 		const key = `bgf:bots:${gameDef.id}:${matchID}`;
@@ -28,6 +46,7 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 		placeCard?: (handIndex: number, zone: string) => void;
 		confirmPlacement?: () => void;
 		confirmReveal?: () => void;
+		ackFightComplete?: () => void;
 	};
 
 	function makeSuitSelectionMove(client: ReturnType<typeof Client>, state: unknown, botPlayerID: string) {
@@ -80,7 +99,16 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 		// If already done placing, nothing to do
 		if (botPlayer.donePlacing) return;
 
-		// If we have cards in hand, place one randomly
+		const keep = botPlayer.justBecameCorrupt ? 2 : 1;
+		if (botPlayer.hand.length <= keep) {
+			if (moves.confirmPlacement) {
+				console.log(`[Crown Duels Bot ${botPlayerID}] Confirming placement (hand at keep limit)`);
+				moves.confirmPlacement();
+			}
+			return;
+		}
+
+		// If we have more cards than we may keep, place one randomly
 		if (botPlayer.hand.length > 0) {
 			const handIndex = Math.floor(Math.random() * botPlayer.hand.length);
 
@@ -93,13 +121,8 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 
 			console.log(`[Crown Duels Bot ${botPlayerID}] Placing card ${handIndex} in ${zone}`);
 			moves.placeCard(handIndex, zone);
+			showToast(`Opponent placed a card in ${ZONE_TOAST_LABEL[zone]}.`, 'info');
 			return;
-		}
-
-		// If hand is empty or we have 1-2 cards left, confirm placement
-		if (moves.confirmPlacement) {
-			console.log(`[Crown Duels Bot ${botPlayerID}] Confirming placement`);
-			moves.confirmPlacement();
 		}
 	}
 
@@ -125,6 +148,26 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 		moves.confirmReveal();
 	}
 
+	function makeFightResolutionMove(client: ReturnType<typeof Client>, state: unknown, botPlayerID: string) {
+		const s = state as {
+			G?: CrownDuelsState;
+			ctx?: { phase?: string; currentPlayer?: string };
+		};
+		const G = s.G;
+		const ctx = s.ctx;
+		const moves = (client as unknown as { moves?: ClientMoves }).moves;
+
+		if (ctx?.phase !== 'fightResolution' || !moves?.ackFightComplete) return;
+		if (ctx.currentPlayer !== botPlayerID) return;
+
+		const botPlayer = G?.players?.[botPlayerID];
+		if (!botPlayer) return;
+		if (botPlayer.confirmedFightDone) return;
+
+		console.log(`[Crown Duels Bot ${botPlayerID}] Ack fight complete`);
+		moves.ackFightComplete();
+	}
+
 	function startBots(matchID: string) {
 		stopBots();
 		const creds = getBotCreds(matchID);
@@ -147,6 +190,15 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 			let lastPhase = '';
 			let lastHandLen = -1;
 			let lastConfirmedReveal = false;
+			let lastConfirmedFightDone = false;
+
+			let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+			function cancelDeferred() {
+				if (pendingTimer !== null) {
+					clearTimeout(pendingTimer);
+					pendingTimer = null;
+				}
+			}
 
 			client.subscribe((state) => {
 				const ctx = state?.ctx as {
@@ -167,14 +219,16 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 				const G = state?.G as CrownDuelsState | undefined;
 				const handLen = G?.players?.[botPlayerID]?.hand?.length ?? -1;
 				const confirmedReveal = G?.players?.[botPlayerID]?.confirmedReveal ?? false;
+				const confirmedFightDone = G?.players?.[botPlayerID]?.confirmedFightDone ?? false;
 
-				// React when turn, phase, hand length, or confirmedReveal changes
+				// React when turn, phase, hand length, or confirm flags change
 				if (
 					turn === lastTurn &&
 					currentPlayer === lastCurrent &&
 					phase === lastPhase &&
 					handLen === lastHandLen &&
-					confirmedReveal === lastConfirmedReveal
+					confirmedReveal === lastConfirmedReveal &&
+					confirmedFightDone === lastConfirmedFightDone
 				) {
 					return;
 				}
@@ -184,26 +238,60 @@ export function useBotPlayers(matchIDRef: Ref<string>, _humanPlayerID: Ref<strin
 				lastPhase = phase;
 				lastHandLen = handLen;
 				lastConfirmedReveal = confirmedReveal;
+				lastConfirmedFightDone = confirmedFightDone;
 
-				// Add a small delay so the UI can update
-				setTimeout(() => {
-					if (phase === 'suitSelection') {
-						makeSuitSelectionMove(client, state, botPlayerID);
-					} else if (phase === 'placement') {
-						makePlacementMove(client, state, botPlayerID);
-					} else if (phase === 'reveal') {
-						makeRevealMove(client, state, botPlayerID);
+				cancelDeferred();
+
+				// Reveal / fight ack must use fresh state and should not wait on a timer (avoids races with
+				// rapid server updates and stale ctx when the delayed callback runs).
+				if (phase === 'reveal' || phase === 'fightResolution') {
+					const fresh = client.getState();
+					if (fresh == null) return;
+					const fctx = fresh.ctx as { gameover?: unknown; phase?: string } | undefined;
+					if (fctx?.gameover) return;
+					const p = fctx?.phase ?? '';
+					// Single dispatch only — a queued microtask would run again before the store
+					// reflected confirmReveal / ackFightComplete and could double-fire moves.
+					if (p === 'reveal') {
+						makeRevealMove(client, fresh, botPlayerID);
+					} else if (p === 'fightResolution') {
+						makeFightResolutionMove(client, fresh, botPlayerID);
 					}
-				}, 300);
+					return;
+				}
+
+				const delayMs =
+					phase === 'placement'
+						? BOT_DELAY_PLACEMENT_MS
+						: phase === 'suitSelection'
+							? BOT_DELAY_SUIT_MS
+							: 300;
+
+				pendingTimer = setTimeout(() => {
+					pendingTimer = null;
+					const fresh = client.getState();
+					if (fresh == null) return;
+
+					const fctx = fresh.ctx as { gameover?: unknown; phase?: string } | undefined;
+					if (fctx?.gameover) return;
+
+					const p = fctx?.phase ?? '';
+					if (p === 'suitSelection') {
+						makeSuitSelectionMove(client, fresh, botPlayerID);
+					} else if (p === 'placement') {
+						makePlacementMove(client, fresh, botPlayerID);
+					}
+				}, delayMs);
 			});
 
 			client.start();
-			botClients.push({ playerID: botPlayerID, client });
+			botClients.push({ playerID: botPlayerID, client, cancelDeferred });
 		}
 	}
 
 	function stopBots() {
-		for (const { client } of botClients) {
+		for (const { client, cancelDeferred } of botClients) {
+			cancelDeferred();
 			try {
 				client.stop();
 			} catch {}

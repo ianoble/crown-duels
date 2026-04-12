@@ -117,6 +117,9 @@ export function reshuffleDiscard(
 	drawDeck: CrownDuelsCard[],
 	discardPile: CrownDuelsCard[],
 ): void {
-	drawDeck.push(...discardPile.splice(0, discardPile.length));
+	const fromDiscard = discardPile.splice(0, discardPile.length);
+	// Jokers are out of play; never recycle them into the draw pile.
+	const playable = fromDiscard.filter((c) => !isJoker(c));
+	drawDeck.push(...playable);
 	shuffle(drawDeck);
 }

@@ -8,9 +8,15 @@ import {
 	getRemainingRoyalty,
 	getNonRoyalCards,
 	shuffle,
-	isJoker,
 } from './cards';
-import { resolveRound, resolveReveal, cleanupRound, getActiveVitality } from './resolution';
+import {
+	resolveRound,
+	resolveReveal,
+	cleanupRound,
+	getActiveVitality,
+	ensureDeckHasCards,
+} from './resolution';
+import { drawCards } from './cards';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -39,6 +45,7 @@ function createPlayer(): PlayerState {
 		justBecameCorrupt: false,
 		donePlacing: false,
 		confirmedReveal: false,
+		confirmedFightDone: false,
 	};
 }
 
@@ -94,10 +101,10 @@ function initializeAfterSuitSelection(G: CrownDuelsState): void {
 	G.drawDeck = shuffle([...getNonRoyalCards(deck)]);
 	G.discardPile = [];
 
-	const jokers = deck.filter(isJoker);
+	// Jokers are not used in play; do not put them in discardPile — reshuffle would
+	// recycle them into the draw deck and they could be dealt to a hand.
 	const jesterHolder = pids[Math.floor(Math.random() * pids.length)];
 	G.players[jesterHolder].hasJester = true;
-	G.discardPile.push(...jokers);
 
 	// Initial draw: 3 cards each (per setup rules)
 	for (const pid of pids) {
@@ -321,10 +328,45 @@ function confirmReveal(
 	const allConfirmed = pids.every((id) => G.players[id].confirmedReveal);
 
 	if (allConfirmed) {
-		// Run fight phase and cleanup
-		executeFightAndCleanup(G);
+		for (const id of pids) {
+			G.players[id].confirmedFightDone = false;
+		}
+		// Resolve fight on the board; cleanup (discard ♥/♦, draw) waits until both ack fightResolution
+		executeFightWithoutCleanup(G);
+		events.setPhase('fightResolution');
+	} else {
+		events.endTurn();
+	}
+}
+
+function ackFightComplete({
+	G,
+	ctx,
+	events,
+}: {
+	G: CrownDuelsState;
+	ctx: Ctx;
+	events: { endTurn: () => void; setPhase: (p: string) => void };
+}) {
+	const pid = ctx.currentPlayer;
+	const player = G.players[pid];
+	if (ctx.phase !== 'fightResolution' || !player || player.confirmedFightDone) {
+		return INVALID_MOVE;
+	}
+
+	player.confirmedFightDone = true;
+
+	const pids = Object.keys(G.players);
+	const allDone = pids.every((id) => G.players[id].confirmedFightDone);
+
+	if (allDone) {
+		const pids2 = Object.keys(G.players);
+		console.log('[ackFightComplete] allDone! hands before cleanup:', pids2.map(id => `${id}:${G.players[id].hand.length}`).join(', '));
+		cleanupRound(G);
+		console.log('[ackFightComplete] after cleanup: gameWinner=%s hands:', G.gameWinner, pids2.map(id => `${id}:${G.players[id].hand.length}`).join(', '));
 		if (G.gameWinner !== null) return;
 		prepareNextRound(G);
+		console.log('[ackFightComplete] after prepareNextRound: round=%d hands:', G.roundNumber, pids2.map(id => `${id}:${G.players[id].hand.length}`).join(', '));
 		events.setPhase('placement');
 	} else {
 		events.endTurn();
@@ -342,19 +384,14 @@ function executeRevealOnly(G: CrownDuelsState): void {
 	G.pendingRevealEvents = revealEvents;
 }
 
-function executeFightAndCleanup(G: CrownDuelsState): void {
-	// Get pending reveal events
+/** Fight + spells + damage; leaves zones intact for UI until {@link cleanupRound}. */
+function executeFightWithoutCleanup(G: CrownDuelsState): void {
 	const pendingRevealEvents = G.pendingRevealEvents ?? [];
 	G.pendingRevealEvents = null;
 
-	// Resolve: Fight (with ♣/♠ spells) → Cast Spells (♥ Siphon, ♦ Shatter) → Damage
 	const result = resolveRound(G);
-	// Merge in the reveal events from earlier
 	result.revealEvents = pendingRevealEvents;
 	G.lastRoundResult = result;
-
-	// Clean Up: discard per-round cards, handle royal defeat, draw, corruption
-	cleanupRound(G);
 }
 
 function prepareNextRound(G: CrownDuelsState): void {
@@ -364,10 +401,39 @@ function prepareNextRound(G: CrownDuelsState): void {
 		const p = G.players[pid];
 		p.donePlacing = false;
 		p.confirmedReveal = false;
+		p.confirmedFightDone = false;
 		// justBecameCorrupt lasts only one round (the Plot phase restriction)
 		p.justBecameCorrupt = false;
 	}
 	// Card draw already happened inside cleanupRound
+}
+
+/**
+ * Runs when entering the Plot phase. Resets placement flags (safety net if state was
+ * inconsistent) and refills hands if cleanup draw was skipped or lost.
+ */
+function onBeginPlacement({ G }: { G: CrownDuelsState }): CrownDuelsState {
+	const pids = Object.keys(G.players);
+	console.log('[onBeginPlacement] round=%d gameWinner=%s hands:', G.roundNumber, G.gameWinner, pids.map(id => `${id}:${G.players[id].hand.length}`).join(', '));
+	for (const pid of pids) {
+		G.players[pid].donePlacing = false;
+	}
+	if (G.gameWinner !== null) {
+		return G;
+	}
+	const resolveOrder = G.players[pids[0]].hasJester ? [0, 1] : [1, 0];
+	for (const idx of resolveOrder) {
+		const p = G.players[pids[idx]];
+		const vitality = getActiveVitality(p);
+		console.log('[onBeginPlacement] player %s: hand=%d vitality=%d deck=%d', pids[idx], p.hand.length, vitality, G.drawDeck.length);
+		if (p.hand.length < vitality) {
+			const needed = vitality - p.hand.length;
+			ensureDeckHasCards(G, needed);
+			p.hand.push(...drawCards(G.drawDeck, needed));
+			console.log('[onBeginPlacement] player %s: drew %d, handAfter=%d', pids[idx], needed, p.hand.length);
+		}
+	}
+	return G;
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +455,7 @@ export const CrownDuelsGame: Game<CrownDuelsState> = {
 			moves: { chooseSuit },
 		},
 		placement: {
+			onBegin: onBeginPlacement,
 			turn: {
 				minMoves: 0,
 				maxMoves: 99,
@@ -401,6 +468,13 @@ export const CrownDuelsGame: Game<CrownDuelsState> = {
 				maxMoves: 1,
 			},
 			moves: { confirmReveal },
+		},
+		fightResolution: {
+			turn: {
+				minMoves: 1,
+				maxMoves: 1,
+			},
+			moves: { ackFightComplete },
 		},
 	},
 

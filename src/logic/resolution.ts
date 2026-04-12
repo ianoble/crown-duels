@@ -1,4 +1,13 @@
-import type { CrownDuelsCard, CrownDuelsState, PlayerState, FightDetail, RoundResult, RevealEvent, FightEvent } from './types';
+import type {
+	CrownDuelsCard,
+	CrownDuelsState,
+	PlayerState,
+	PlayerZones,
+	FightDetail,
+	RoundResult,
+	RevealEvent,
+	FightEvent,
+} from './types';
 import { ROYAL_VITALITY } from './types';
 import { drawCards, reshuffleDiscard } from './cards';
 
@@ -13,8 +22,9 @@ export function getActiveVitality(player: PlayerState): number {
 	return ROYAL_VITALITY[rank] ?? 3;
 }
 
-function ensureDeckHasCards(G: CrownDuelsState, needed: number): void {
-	if (G.drawDeck.length < needed && G.discardPile.length > 0) {
+/** Ensure draw pile has at least `needed` cards (reshuffle discard once or until exhausted). */
+export function ensureDeckHasCards(G: CrownDuelsState, needed: number): void {
+	while (G.drawDeck.length < needed && G.discardPile.length > 0) {
 		reshuffleDiscard(G.drawDeck, G.discardPile);
 	}
 }
@@ -29,6 +39,19 @@ function hasMatchingValue(cards: CrownDuelsCard[], value: number): boolean {
 
 function countMatchingValues(cards: CrownDuelsCard[], value: number): number {
 	return cards.filter((c) => c.value === value).length;
+}
+
+function cloneCard(c: CrownDuelsCard): CrownDuelsCard {
+	return { ...c };
+}
+
+function clonePlayerZones(z: PlayerZones): PlayerZones {
+	return {
+		attack: z.attack.map(cloneCard),
+		defence: z.defence.map(cloneCard),
+		spell: z.spell.map(cloneCard),
+		corruption: z.corruption.map(cloneCard),
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +546,12 @@ export function resolveRound(G: CrownDuelsState): RoundResult {
 	// --- Phase 2: REVEAL ---
 	const revealEvents = resolveReveal(G);
 
+	// Snapshot zones for client fight playback (cleanup strips ♥/♦/spells before next round)
+	const fightBoardSnapshot: Record<string, PlayerZones> = {};
+	for (const pid of pids) {
+		fightBoardSnapshot[pid] = clonePlayerZones(G.players[pid].zones);
+	}
+
 	// --- Phase 3: FIGHT (includes ♣/♠ spell adjustments) ---
 	const detail0 = buildFightDetail(p0);
 	const detail1 = buildFightDetail(p1);
@@ -732,6 +761,7 @@ export function resolveRound(G: CrownDuelsState): RoundResult {
 		},
 		revealEvents,
 		fightEvents,
+		fightBoardSnapshot,
 	};
 }
 
@@ -835,9 +865,11 @@ export function cleanupRound(G: CrownDuelsState): void {
 		G.gameWinner = pids.find((pid) => pid !== kingDefeated[0])!;
 	}
 
+	console.log('[cleanupRound] gameWinner=%s kingDefeated=%j', G.gameWinner, kingDefeated);
 	if (G.gameWinner !== null) return;
 
 	// 3. Each player draws cards equal to their vitality
+	console.log('[cleanupRound] calling drawForRound...');
 	drawForRound(G);
 
 	// 4. Corruption check
@@ -856,10 +888,15 @@ export function drawForRound(G: CrownDuelsState): void {
 	const pids = Object.keys(G.players);
 	const resolveOrder = G.players[pids[0]].hasJester ? [0, 1] : [1, 0];
 
+	console.log('[drawForRound] deck=%d discard=%d', G.drawDeck.length, G.discardPile.length);
 	for (const idx of resolveOrder) {
 		const p = G.players[pids[idx]];
 		const vitality = getActiveVitality(p);
+		console.log('[drawForRound] player %s: handBefore=%d vitality=%d deckBefore=%d', pids[idx], p.hand.length, vitality, G.drawDeck.length);
 		ensureDeckHasCards(G, vitality);
-		p.hand.push(...drawCards(G.drawDeck, vitality));
+		const drawn = drawCards(G.drawDeck, vitality);
+		console.log('[drawForRound] player %s: drew %d cards, deckAfter=%d', pids[idx], drawn.length, G.drawDeck.length);
+		p.hand.push(...drawn);
+		console.log('[drawForRound] player %s: handAfter=%d', pids[idx], p.hand.length);
 	}
 }
