@@ -25,9 +25,29 @@ export function prepareGame(def) {
     }
     return game;
 }
+function wrapMoveWithHistory(moveName, moveFn) {
+    return (context, ...args) => {
+        const result = moveFn(context, ...args);
+        if (result === INVALID_MOVE)
+            return INVALID_MOVE;
+        const G = context.G;
+        if (!G.history)
+            G.history = [];
+        const logEntry = {
+            seq: G.history.length + 1,
+            timestamp: new Date().toISOString(),
+            playerID: context.playerID ?? context.ctx.currentPlayer,
+            moveName,
+            args: args.map(sanitiseArg),
+        };
+        G.history.push(logEntry);
+        return result;
+    };
+}
 /**
  * Wraps `setup` to inject `history: []` and wraps every move so that a
  * {@link LogEntry} is appended to `G.history` after successful execution.
+ * Long-form moves `{ move, undoable, ... }` keep their metadata for boardgame.io.
  * Applied unconditionally by {@link prepareGame}.
  */
 function applyHistoryTracking(game) {
@@ -35,26 +55,19 @@ function applyHistoryTracking(game) {
     const originalMoves = game.moves ?? {};
     const trackedMoves = {};
     for (const [name, entry] of Object.entries(originalMoves)) {
-        const moveFn = typeof entry === 'function'
-            ? entry
-            : entry.move;
-        trackedMoves[name] = (context, ...args) => {
-            const result = moveFn(context, ...args);
-            if (result === INVALID_MOVE)
-                return INVALID_MOVE;
-            const G = context.G;
-            if (!G.history)
-                G.history = [];
-            const entry = {
-                seq: G.history.length + 1,
-                timestamp: new Date().toISOString(),
-                playerID: context.playerID ?? context.ctx.currentPlayer,
-                moveName: name,
-                args: args.map(sanitiseArg),
+        if (typeof entry === 'function') {
+            trackedMoves[name] = wrapMoveWithHistory(name, entry);
+        }
+        else if (entry != null && typeof entry === 'object' && 'move' in entry) {
+            const desc = entry;
+            trackedMoves[name] = {
+                ...entry,
+                move: wrapMoveWithHistory(name, desc.move),
             };
-            G.history.push(entry);
-            return result;
-        };
+        }
+        else {
+            trackedMoves[name] = entry;
+        }
     }
     return {
         ...game,
@@ -89,19 +102,31 @@ function applyMoveValidation(game, validate) {
     const originalMoves = game.moves ?? {};
     const wrappedMoves = {};
     for (const [name, entry] of Object.entries(originalMoves)) {
-        const moveFn = typeof entry === 'function'
-            ? entry
-            : entry.move;
-        wrappedMoves[name] = (context, ...args) => {
-            const result = validate({
-                G: context.G,
-                playerID: context.playerID,
-                currentPlayer: context.ctx.currentPlayer,
-            }, name, ...args);
-            if (result !== true)
-                return INVALID_MOVE;
-            return moveFn(context, ...args);
+        const wrapValidatedInner = (inner) => {
+            return (context, ...args) => {
+                const v = validate({
+                    G: context.G,
+                    playerID: context.playerID,
+                    currentPlayer: context.ctx.currentPlayer,
+                }, name, ...args);
+                if (v !== true)
+                    return INVALID_MOVE;
+                return inner(context, ...args);
+            };
         };
+        if (typeof entry === 'function') {
+            wrappedMoves[name] = wrapValidatedInner(entry);
+        }
+        else if (entry != null && typeof entry === 'object' && 'move' in entry) {
+            const desc = entry;
+            wrappedMoves[name] = {
+                ...entry,
+                move: wrapValidatedInner(desc.move),
+            };
+        }
+        else {
+            wrappedMoves[name] = entry;
+        }
     }
     return { ...game, moves: wrappedMoves };
 }
